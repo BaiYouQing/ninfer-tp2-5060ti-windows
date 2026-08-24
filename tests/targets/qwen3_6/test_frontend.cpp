@@ -317,6 +317,28 @@ int test_official_tokenizer_merge() {
     return failures;
 }
 
+int test_bpe_merge_order() {
+    const std::string tokenizer_json = nlohmann::json{
+        {"model",
+         {{"type", "BPE"},
+          {"vocab", {{"a", 0}, {"aa", 1}, {"aaa", 2}, {"b", 3}, {"c", 4}, {"bc", 5}, {"abc", 6}}},
+          {"merges",
+           nlohmann::json::array(
+               {nlohmann::json::array({"a", "a"}), nlohmann::json::array({"aa", "a"}),
+                nlohmann::json::array({"b", "c"}), nlohmann::json::array({"a", "bc"})})}}},
+        {"added_tokens",
+         nlohmann::json::array()}}.dump();
+    const std::string tokenizer_config_json =
+        nlohmann::json{{"added_tokens_decoder", nlohmann::json::object()}}.dump();
+    const fi::Tokenizer tokenizer({.tokenizer_json         = tokenizer_json,
+                                   .tokenizer_config_json  = tokenizer_config_json,
+                                   .generation_config_json = R"({"eos_token_id":0})"});
+    return check(tokenizer.encode("aaa") == std::vector<int>{2} &&
+                     tokenizer.encode("aaaa") == std::vector<int>({1, 1}) &&
+                     tokenizer.encode("abc") == std::vector<int>{6},
+                 "priority BPE changed rank or leftmost merge semantics");
+}
+
 int test_repeated_special_tokens_scan_linearly() {
     constexpr std::string_view token = "<|image_pad|>";
     std::string text;
@@ -1390,6 +1412,7 @@ int main() {
     const Frontend frontend       = FrontendFactory::create_component(owned);
     int failures                  = 0;
     failures += test_official_tokenizer_merge();
+    failures += test_bpe_merge_order();
     failures += test_repeated_special_tokens_scan_linearly();
     failures += test_official_chat_template();
     failures += test_ordered_instruction_turns();
