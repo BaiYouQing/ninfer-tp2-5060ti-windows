@@ -508,6 +508,7 @@ struct BpeNode {
     int symbol               = -1;
     int previous             = -1;
     int next                 = -1;
+    std::size_t end          = 0;
     std::uint32_t generation = 0;
     bool live                = true;
 };
@@ -519,6 +520,11 @@ struct BpeCandidate {
     int result                     = -1;
     std::uint32_t left_generation  = 0;
     std::uint32_t right_generation = 0;
+};
+
+struct BpeWordEnd {
+    std::size_t normalized_offset = 0;
+    std::size_t token_frontier    = 0;
 };
 
 struct LaterBpeCandidate {
@@ -539,13 +545,14 @@ std::array<int, 256> load_byte_token_ids(const std::unordered_map<std::string, i
     return ids;
 }
 
-bool append_bpe_ids(std::vector<int>& ids, std::string_view text,
-                    const std::unordered_map<std::uint64_t, BpeMergeRule>& merge_rules,
-                    const std::array<int, 256>& byte_token_ids, std::size_t max_tokens) {
-    if (text.empty()) { return true; }
+bool append_normalized_bpe_ids(std::vector<int>& ids, std::string_view normalized,
+                               const std::unordered_map<std::uint64_t, BpeMergeRule>& merge_rules,
+                               const std::array<int, 256>& byte_token_ids, std::size_t max_tokens,
+                               std::vector<std::size_t>* token_ends = nullptr,
+                               std::vector<BpeWordEnd>* word_ends   = nullptr) {
+    if (normalized.empty()) { return true; }
     if (ids.size() == max_tokens) { return false; }
 
-    const std::string normalized = uni::normalize_nfc(text);
     for (std::size_t begin = 0; begin < normalized.size();) {
         const std::size_t end = qwen_word_end(normalized, begin);
         const std::string_view word(normalized.data() + begin, end - begin);
@@ -560,7 +567,8 @@ bool append_bpe_ids(std::vector<int>& ids, std::string_view text,
             nodes[index] =
                 BpeNode{.symbol   = symbol,
                         .previous = index == 0 ? -1 : static_cast<int>(index - 1),
-                        .next     = index + 1 == word.size() ? -1 : static_cast<int>(index + 1)};
+                        .next     = index + 1 == word.size() ? -1 : static_cast<int>(index + 1),
+                        .end      = index + 1};
         }
 
         std::priority_queue<BpeCandidate, std::vector<BpeCandidate>, LaterBpeCandidate> queue;
@@ -595,6 +603,7 @@ bool append_bpe_ids(std::vector<int>& ids, std::string_view text,
                 continue;
             }
             left.symbol = candidate.result;
+            left.end    = right.end;
             ++left.generation;
             left.next  = right.next;
             right.live = false;
@@ -608,9 +617,117 @@ bool append_bpe_ids(std::vector<int>& ids, std::string_view text,
         for (int node = nodes.empty() ? -1 : 0; node >= 0;
              node     = nodes[static_cast<std::size_t>(node)].next) {
             ids.push_back(nodes[static_cast<std::size_t>(node)].symbol);
+            if (token_ends != nullptr) {
+                token_ends->push_back(begin + nodes[static_cast<std::size_t>(node)].end);
+            }
             if (ids.size() == max_tokens) { return false; }
         }
+        if (word_ends != nullptr) {
+            word_ends->push_back(
+                BpeWordEnd{.normalized_offset = end, .token_frontier = ids.size()});
+        }
         begin = end;
+    }
+    return true;
+}
+
+struct IndexedByteBoundary {
+    std::size_t offset = 0;
+    std::size_t index  = 0;
+};
+
+bool append_ordinary_text(BoundaryEncodedText& encoded, std::string_view text,
+                          std::size_t text_offset, std::span<const IndexedByteBoundary> boundaries,
+                          const std::unordered_map<std::uint64_t, BpeMergeRule>& merge_rules,
+                          const std::array<int, 256>& byte_token_ids, std::size_t max_tokens) {
+    const std::size_t token_base = encoded.input_ids.size();
+    if (text.empty()) {
+        for (const IndexedByteBoundary boundary : boundaries) {
+            encoded.boundaries[boundary.index] =
+                TokenBoundaryResult{.exact_frontier = token_base, .stable_frontier = token_base};
+        }
+        return true;
+    }
+
+    const std::string normalized = uni::normalize_nfc(text);
+    const bool has_internal_boundary =
+        std::any_of(boundaries.begin(), boundaries.end(), [&](IndexedByteBoundary boundary) {
+            const std::size_t local = boundary.offset - text_offset;
+            return local != 0 && local != text.size();
+        });
+    std::vector<std::size_t> token_ends;
+    std::vector<BpeWordEnd> word_ends;
+    if (has_internal_boundary) { token_ends.reserve(normalized.size()); }
+    if (!append_normalized_bpe_ids(encoded.input_ids, normalized, merge_rules, byte_token_ids,
+                                   max_tokens, has_internal_boundary ? &token_ends : nullptr,
+                                   has_internal_boundary ? &word_ends : nullptr)) {
+        return false;
+    }
+    const std::size_t token_end = encoded.input_ids.size();
+    if (!has_internal_boundary) {
+        for (const IndexedByteBoundary boundary : boundaries) {
+            const std::size_t frontier = boundary.offset == text_offset ? token_base : token_end;
+            encoded.boundaries[boundary.index] =
+                TokenBoundaryResult{.exact_frontier = frontier, .stable_frontier = frontier};
+        }
+        return true;
+    }
+
+    std::vector<std::size_t> normalized_boundaries(boundaries.size());
+    std::string independently_normalized;
+    independently_normalized.reserve(normalized.size());
+    std::size_t raw_begin = 0;
+    for (std::size_t request = 0; request < boundaries.size(); ++request) {
+        const std::size_t raw_end = boundaries[request].offset - text_offset;
+        if (raw_end != raw_begin) {
+            independently_normalized +=
+                uni::normalize_nfc(text.substr(raw_begin, raw_end - raw_begin));
+            raw_begin = raw_end;
+        }
+        normalized_boundaries[request] = independently_normalized.size();
+    }
+    if (raw_begin != text.size()) {
+        independently_normalized += uni::normalize_nfc(text.substr(raw_begin));
+    }
+
+    if (independently_normalized != normalized) {
+        // A requested marker splits a canonical-composition sequence. The full token stream stays
+        // authoritative; conservatively retain only the preceding added-token/ordinary boundary.
+        for (const IndexedByteBoundary boundary : boundaries) {
+            const std::size_t local = boundary.offset - text_offset;
+            if (local == 0 || local == text.size()) {
+                const std::size_t frontier = local == 0 ? token_base : token_end;
+                encoded.boundaries[boundary.index] =
+                    TokenBoundaryResult{.exact_frontier = frontier, .stable_frontier = frontier};
+            } else {
+                encoded.boundaries[boundary.index] = TokenBoundaryResult{
+                    .exact_frontier = std::nullopt, .stable_frontier = token_base};
+            }
+        }
+        return true;
+    }
+
+    std::size_t token_cursor    = 0;
+    std::size_t word_cursor     = 0;
+    std::size_t stable_frontier = token_base;
+    for (std::size_t request = 0; request < boundaries.size(); ++request) {
+        const std::size_t normalized_boundary = normalized_boundaries[request];
+        while (token_cursor < token_ends.size() &&
+               token_ends[token_cursor] <= normalized_boundary) {
+            ++token_cursor;
+        }
+        while (word_cursor < word_ends.size() &&
+               word_ends[word_cursor].normalized_offset <= normalized_boundary) {
+            stable_frontier = word_ends[word_cursor].token_frontier;
+            ++word_cursor;
+        }
+        const bool exact =
+            normalized_boundary == 0 ||
+            (token_cursor != 0 && token_ends[token_cursor - 1] == normalized_boundary);
+        const std::size_t frontier                    = token_base + token_cursor;
+        encoded.boundaries[boundaries[request].index] = TokenBoundaryResult{
+            .exact_frontier  = exact ? std::optional<std::size_t>(frontier) : std::nullopt,
+            .stable_frontier = stable_frontier};
     }
     return true;
 }
@@ -669,14 +786,50 @@ Tokenizer::Tokenizer(TokenizerResources resources) {
 }
 
 std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options) const {
-    if (text.empty() || options.max_tokens == 0) { return {}; }
+    BoundaryEncodedText encoded = encode_with_boundaries(text, {}, options);
+    return std::move(encoded.input_ids);
+}
+
+BoundaryEncodedText Tokenizer::encode_with_boundaries(std::string_view text,
+                                                      std::span<const std::size_t> byte_boundaries,
+                                                      EncodeOptions options) const {
+    BoundaryEncodedText encoded;
+    encoded.boundaries.resize(byte_boundaries.size());
+    std::vector<IndexedByteBoundary> boundaries;
+    boundaries.reserve(byte_boundaries.size());
+    for (std::size_t index = 0; index < byte_boundaries.size(); ++index) {
+        if (byte_boundaries[index] > text.size()) {
+            throw std::out_of_range("Tokenizer byte boundary exceeds input text");
+        }
+        boundaries.push_back(IndexedByteBoundary{.offset = byte_boundaries[index], .index = index});
+    }
+    std::stable_sort(
+        boundaries.begin(), boundaries.end(),
+        [](IndexedByteBoundary lhs, IndexedByteBoundary rhs) { return lhs.offset < rhs.offset; });
+    if (options.max_tokens == 0) { return encoded; }
+
+    std::size_t boundary_cursor     = 0;
+    const auto boundary_end_through = [&](std::size_t offset) {
+        std::size_t end = boundary_cursor;
+        while (end < boundaries.size() && boundaries[end].offset <= offset) { ++end; }
+        return end;
+    };
+    const auto append_ordinary = [&](std::size_t begin, std::size_t end) {
+        const std::size_t request_end = boundary_end_through(end);
+        const bool complete =
+            append_ordinary_text(encoded, text.substr(begin, end - begin), begin,
+                                 std::span<const IndexedByteBoundary>(boundaries)
+                                     .subspan(boundary_cursor, request_end - boundary_cursor),
+                                 bpe_merge_rules_, byte_token_ids_, options.max_tokens);
+        boundary_cursor = request_end;
+        return complete;
+    };
+
     if (!options.parse_added_tokens) {
-        std::vector<int> ids;
-        (void)append_bpe_ids(ids, text, bpe_merge_rules_, byte_token_ids_, options.max_tokens);
-        return ids;
+        (void)append_ordinary(0, text.size());
+        return encoded;
     }
 
-    std::vector<int> ids;
     std::size_t ordinary_begin = 0;
     std::size_t pos            = 0;
     while (pos < text.size()) {
@@ -696,23 +849,30 @@ std::vector<int> Tokenizer::encode(std::string_view text, EncodeOptions options)
             continue;
         }
 
-        if (pos > ordinary_begin) {
-            if (!append_bpe_ids(ids, text.substr(ordinary_begin, pos - ordinary_begin),
-                                bpe_merge_rules_, byte_token_ids_, options.max_tokens)) {
-                return ids;
-            }
-        }
+        if (!append_ordinary(ordinary_begin, pos)) { return encoded; }
 
-        ids.push_back(match_token->id);
-        if (ids.size() == options.max_tokens) { return ids; }
-        pos += match_token->content.size();
+        const std::size_t token_end       = pos + match_token->content.size();
+        const std::size_t stable_frontier = encoded.input_ids.size();
+        while (boundary_cursor < boundaries.size() &&
+               boundaries[boundary_cursor].offset < token_end) {
+            encoded.boundaries[boundaries[boundary_cursor].index] = TokenBoundaryResult{
+                .exact_frontier = std::nullopt, .stable_frontier = stable_frontier};
+            ++boundary_cursor;
+        }
+        encoded.input_ids.push_back(match_token->id);
+        if (encoded.input_ids.size() == options.max_tokens) { return encoded; }
+        while (boundary_cursor < boundaries.size() &&
+               boundaries[boundary_cursor].offset == token_end) {
+            encoded.boundaries[boundaries[boundary_cursor].index] =
+                TokenBoundaryResult{.exact_frontier  = encoded.input_ids.size(),
+                                    .stable_frontier = encoded.input_ids.size()};
+            ++boundary_cursor;
+        }
+        pos            = token_end;
         ordinary_begin = pos;
     }
-    if (ordinary_begin < text.size()) {
-        (void)append_bpe_ids(ids, text.substr(ordinary_begin), bpe_merge_rules_, byte_token_ids_,
-                             options.max_tokens);
-    }
-    return ids;
+    (void)append_ordinary(ordinary_begin, text.size());
+    return encoded;
 }
 
 std::string Tokenizer::decode(std::span<const int> ids, DecodeOptions options) const {

@@ -436,15 +436,24 @@ RenderedChat expand_placeholders(RenderedChat rendered, const std::vector<Vision
             throw std::invalid_argument("chat media order does not match rendered placeholders");
         }
         const std::string replacement = placeholder(item);
-        if (rendered.rewrite_checkpoint) {
-            const std::size_t boundary = rendered.rewrite_checkpoint->offset;
-            const std::size_t end      = position + needle.size();
+        const auto adjust_boundary    = [&](std::size_t& boundary, std::string_view kind) {
+            const std::size_t end = position + needle.size();
             if (position < boundary && boundary < end) {
-                throw std::logic_error("rewrite checkpoint intersects a media placeholder");
+                throw std::logic_error(std::string(kind) + " intersects a media placeholder");
             }
-            if (end <= boundary) {
-                rendered.rewrite_checkpoint->offset = boundary - needle.size() + replacement.size();
-            }
+            if (end <= boundary) { boundary = boundary - needle.size() + replacement.size(); }
+        };
+        if (rendered.rewrite_checkpoint) {
+            adjust_boundary(rendered.rewrite_checkpoint->offset, "rewrite checkpoint");
+        }
+        for (std::size_t& boundary : rendered.rewrite_execution_boundaries) {
+            adjust_boundary(boundary, "rewrite execution boundary");
+        }
+        for (std::optional<std::size_t>& boundary : rendered.message_boundaries) {
+            if (boundary) { adjust_boundary(*boundary, "message boundary"); }
+        }
+        for (std::optional<std::size_t>& boundary : rendered.cache_boundaries) {
+            if (boundary) { adjust_boundary(*boundary, "cache boundary"); }
         }
         rendered.text.replace(position, needle.size(), replacement);
         search = position + replacement.size();
@@ -587,26 +596,83 @@ std::span<const std::int32_t> ProcessedInput::position_axis(int axis) const {
         static_cast<std::size_t>(axis) * input_ids.size(), input_ids.size());
 }
 
-EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered) {
+EncodedChat encode_rendered_chat(const Tokenizer& tokenizer, const RenderedChat& rendered,
+                                 std::size_t maximum_tokens) {
     EncodedChat encoded;
-    encoded.input_ids = tokenizer.encode(rendered.text);
-    if (!rendered.rewrite_checkpoint) { return encoded; }
-    if (rendered.rewrite_checkpoint->offset > rendered.text.size()) {
-        throw std::logic_error("rewrite checkpoint byte offset exceeds rendered chat");
+    std::vector<std::size_t> byte_boundaries;
+    byte_boundaries.reserve((rendered.rewrite_checkpoint ? 1U : 0U) +
+                            rendered.rewrite_execution_boundaries.size() +
+                            rendered.message_boundaries.size() + rendered.cache_boundaries.size());
+    if (rendered.rewrite_checkpoint) {
+        byte_boundaries.push_back(rendered.rewrite_checkpoint->offset);
     }
-    const std::vector<int> prefix = tokenizer.encode(
-        std::string_view(rendered.text).substr(0, rendered.rewrite_checkpoint->offset));
-    if (prefix.empty() || prefix.size() > encoded.input_ids.size() ||
-        !std::equal(prefix.begin(), prefix.end(), encoded.input_ids.begin())) {
-        throw std::logic_error("rewrite checkpoint is not an exact token prefix");
+    byte_boundaries.insert(byte_boundaries.end(), rendered.rewrite_execution_boundaries.begin(),
+                           rendered.rewrite_execution_boundaries.end());
+    for (const std::optional<std::size_t> boundary : rendered.message_boundaries) {
+        if (boundary) { byte_boundaries.push_back(*boundary); }
     }
-    if (prefix.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::overflow_error("rewrite checkpoint token frontier exceeds uint32");
+    for (const std::optional<std::size_t> boundary : rendered.cache_boundaries) {
+        if (boundary) { byte_boundaries.push_back(*boundary); }
     }
-    encoded.rewrite_checkpoint = RewriteCheckpointSpec{
-        .kind     = rendered.rewrite_checkpoint->kind,
-        .frontier = static_cast<std::uint32_t>(prefix.size()),
+
+    BoundaryEncodedText tokenized = tokenizer.encode_with_boundaries(
+        rendered.text, byte_boundaries, EncodeOptions{.max_tokens = maximum_tokens});
+    encoded.input_ids = std::move(tokenized.input_ids);
+    if (encoded.input_ids.size() == maximum_tokens) { return encoded; }
+    std::size_t boundary_index = 0;
+    const auto to_frontier     = [](std::size_t frontier, std::string_view kind) {
+        if (frontier > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::overflow_error(std::string(kind) + " token frontier exceeds uint32");
+        }
+        return static_cast<std::uint32_t>(frontier);
     };
+    if (rendered.rewrite_checkpoint) {
+        const TokenBoundaryResult& boundary = tokenized.boundaries.at(boundary_index++);
+        if (!boundary.exact_frontier) {
+            throw std::logic_error("rewrite checkpoint is not an exact token boundary");
+        }
+        const std::uint32_t frontier = to_frontier(*boundary.exact_frontier, "rewrite checkpoint");
+        if (frontier == 0) {
+            throw std::logic_error("rewrite checkpoint has an empty token prefix");
+        }
+        encoded.rewrite_checkpoint =
+            RewriteCheckpointSpec{.kind = rendered.rewrite_checkpoint->kind, .frontier = frontier};
+    }
+    encoded.rewrite_execution_frontiers.reserve(rendered.rewrite_execution_boundaries.size());
+    for (std::size_t remaining = rendered.rewrite_execution_boundaries.size(); remaining != 0;
+         --remaining) {
+        const TokenBoundaryResult& result = tokenized.boundaries.at(boundary_index++);
+        const std::optional<std::uint32_t> frontier =
+            result.exact_frontier ? std::optional<std::uint32_t>(to_frontier(
+                                        *result.exact_frontier, "rewrite execution boundary"))
+                                  : std::nullopt;
+        if (frontier && *frontier != 0 &&
+            (encoded.rewrite_execution_frontiers.empty() ||
+             encoded.rewrite_execution_frontiers.back() != *frontier)) {
+            encoded.rewrite_execution_frontiers.push_back(*frontier);
+        }
+    }
+    encoded.message_boundaries.resize(rendered.message_boundaries.size());
+    for (std::size_t index = 0; index < rendered.message_boundaries.size(); ++index) {
+        if (rendered.message_boundaries[index]) {
+            const TokenBoundaryResult& boundary = tokenized.boundaries.at(boundary_index++);
+            if (boundary.exact_frontier) {
+                encoded.message_boundaries[index] =
+                    to_frontier(*boundary.exact_frontier, "message boundary");
+            }
+        }
+    }
+    encoded.cache_boundaries.resize(rendered.cache_boundaries.size());
+    for (std::size_t index = 0; index < rendered.cache_boundaries.size(); ++index) {
+        if (rendered.cache_boundaries[index]) {
+            const TokenBoundaryResult& boundary = tokenized.boundaries.at(boundary_index++);
+            encoded.cache_boundaries[index] =
+                to_frontier(boundary.stable_frontier, "cache boundary");
+        }
+    }
+    if (boundary_index != tokenized.boundaries.size()) {
+        throw std::logic_error("rendered token boundary result count changed during encoding");
+    }
     return encoded;
 }
 
@@ -631,7 +697,8 @@ Processor::Processor(const Tokenizer& tokenizer, const CompiledChatTemplate& cha
 
 ProcessedInput Processor::process(std::vector<ChatMessage> messages,
                                   ChatRenderOptions render_options,
-                                  const PreparationControl& control) const {
+                                  const PreparationControl& control,
+                                  std::size_t maximum_prompt_tokens) const {
     check_preparation_control(control);
     const std::vector<ChatPart*> parts = media_parts(messages);
     const std::uint64_t maximum_items_from_extents =
@@ -648,8 +715,25 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
         }
         remaining_media_bytes -= part->media.bytes.size();
     }
-    MediaPreparationPermit request_permit = media_cache_->acquire_request(control);
     RenderedChat rendered = chat_template_.render(messages, std::move(render_options));
+    const std::size_t encode_limit =
+        maximum_prompt_tokens == std::numeric_limits<std::size_t>::max()
+            ? maximum_prompt_tokens
+            : maximum_prompt_tokens + 1U;
+    double preliminary_tokenize_seconds = 0.0;
+    if (maximum_prompt_tokens != std::numeric_limits<std::size_t>::max()) {
+        const auto preliminary_started = Clock::now();
+        const std::size_t preliminary_tokens =
+            tokenizer_.encode(rendered.text, EncodeOptions{.max_tokens = encode_limit}).size();
+        preliminary_tokenize_seconds =
+            std::chrono::duration<double>(Clock::now() - preliminary_started).count();
+        if (preliminary_tokens > maximum_prompt_tokens) {
+            throw ProcessorError(ProcessorErrorKind::ContextLengthExceeded,
+                                 "prepared prompt exceeds Engine max_context " +
+                                     std::to_string(maximum_prompt_tokens));
+        }
+    }
+    MediaPreparationPermit request_permit = media_cache_->acquire_request(control);
     std::atomic<bool> stop_preparation{false};
     const PreparationControl worker_control{
         .deadline     = control.deadline,
@@ -668,8 +752,9 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
     std::vector<VisionItem> items;
     items.reserve(parts.size());
     PreprocessStats stats;
-    stats.media_items = parts.size();
-    stats.media_bytes = options_.max_encoded_media_bytes - remaining_media_bytes;
+    stats.media_items      = parts.size();
+    stats.media_bytes      = options_.max_encoded_media_bytes - remaining_media_bytes;
+    stats.tokenize_seconds = preliminary_tokenize_seconds;
 
     std::vector<PendingMedia> pending_items;
     pending_items.reserve(parts.size());
@@ -767,11 +852,20 @@ ProcessedInput Processor::process(std::vector<ChatMessage> messages,
     check_preparation_control(control);
     rendered                    = expand_placeholders(std::move(rendered), items);
     const auto tokenize_started = Clock::now();
-    EncodedChat encoded         = encode_rendered_chat(tokenizer_, rendered);
-    stats.tokenize_seconds = std::chrono::duration<double>(Clock::now() - tokenize_started).count();
+    EncodedChat encoded         = encode_rendered_chat(tokenizer_, rendered, encode_limit);
+    stats.tokenize_seconds +=
+        std::chrono::duration<double>(Clock::now() - tokenize_started).count();
     check_preparation_control(control, "tokenization");
-    output.input_ids          = std::move(encoded.input_ids);
-    output.rewrite_checkpoint = encoded.rewrite_checkpoint;
+    if (encoded.input_ids.size() > maximum_prompt_tokens) {
+        throw ProcessorError(ProcessorErrorKind::ContextLengthExceeded,
+                             "prepared prompt exceeds Engine max_context " +
+                                 std::to_string(maximum_prompt_tokens));
+    }
+    output.input_ids                   = std::move(encoded.input_ids);
+    output.rewrite_checkpoint          = encoded.rewrite_checkpoint;
+    output.rewrite_execution_frontiers = std::move(encoded.rewrite_execution_frontiers);
+    output.message_boundaries          = std::move(encoded.message_boundaries);
+    output.cache_boundaries            = std::move(encoded.cache_boundaries);
     output.token_types.resize(output.input_ids.size(), 0);
     for (std::size_t i = 0; i < output.input_ids.size(); ++i) {
         if (output.input_ids[i] == kImageToken) {

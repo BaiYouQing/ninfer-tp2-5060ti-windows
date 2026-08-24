@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -48,11 +49,26 @@ struct BpeMergeRule {
     int result = -1;
 };
 
+struct TokenBoundaryResult {
+    // exact_frontier is present when the byte marker is also a boundary in the complete token
+    // stream. stable_frontier retains only a normalization- and pre-tokenization-complete prefix.
+    std::optional<std::size_t> exact_frontier;
+    std::size_t stable_frontier = 0;
+};
+
+struct BoundaryEncodedText {
+    std::vector<int> input_ids;
+    std::vector<TokenBoundaryResult> boundaries;
+};
+
 class Tokenizer {
 public:
     explicit Tokenizer(TokenizerResources resources);
 
     std::vector<int> encode(std::string_view text, EncodeOptions options = {}) const;
+    BoundaryEncodedText encode_with_boundaries(std::string_view text,
+                                               std::span<const std::size_t> byte_boundaries,
+                                               EncodeOptions options = {}) const;
     std::string decode(std::span<const int> ids, DecodeOptions options = {}) const;
     [[nodiscard]] DecodedTokenView decoded_token(int id) const;
     [[nodiscard]] std::string_view decode_token_bytes(int id,

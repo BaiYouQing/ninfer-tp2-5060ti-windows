@@ -339,6 +339,42 @@ int test_bpe_merge_order() {
                  "priority BPE changed rank or leftmost merge semantics");
 }
 
+int test_boundary_aware_tokenization() {
+    const std::string tokenizer_json = nlohmann::json{
+        {"model",
+         {{"type", "BPE"},
+          {"vocab", {{"a", 0}, {"b", 1}, {"c", 2}, {"bc", 3}, {"ab", 4}}},
+          {"merges", nlohmann::json::array(
+                         {nlohmann::json::array({"b", "c"}), nlohmann::json::array({"a", "b"})})}}},
+        {"added_tokens",
+         nlohmann::json::array()}}.dump();
+    const std::string tokenizer_config_json =
+        nlohmann::json{{"added_tokens_decoder", nlohmann::json::object()}}.dump();
+    const fi::Tokenizer tokenizer({.tokenizer_json         = tokenizer_json,
+                                   .tokenizer_config_json  = tokenizer_config_json,
+                                   .generation_config_json = R"({"eos_token_id":0})"});
+    constexpr std::array<std::size_t, 5> boundaries{2, 3, 0, 1, 2};
+    const fi::BoundaryEncodedText encoded = tokenizer.encode_with_boundaries("abc", boundaries);
+    int failures                          = check(
+        encoded.input_ids == std::vector<int>({0, 3}) && encoded.boundaries.size() == 5 &&
+            !encoded.boundaries[0].exact_frontier && encoded.boundaries[0].stable_frontier == 0 &&
+            encoded.boundaries[1].exact_frontier == 2 &&
+            encoded.boundaries[2].exact_frontier == 0 &&
+            encoded.boundaries[3].exact_frontier == 1 && !encoded.boundaries[4].exact_frontier,
+        "boundary-aware tokenizer changed crossing-token or result-order semantics");
+
+    constexpr std::string_view decomposed = "e\xCC\x81x";
+    constexpr std::array<std::size_t, 1> composition_boundary{1};
+    const fi::Tokenizer& official = official_tokenizer();
+    const fi::BoundaryEncodedText normalized =
+        official.encode_with_boundaries(decomposed, composition_boundary);
+    failures += check(normalized.input_ids == official.encode(decomposed) &&
+                          !normalized.boundaries.front().exact_frontier &&
+                          normalized.boundaries.front().stable_frontier == 0,
+                      "boundary-aware tokenizer split an NFC composition sequence");
+    return failures;
+}
+
 int test_repeated_special_tokens_scan_linearly() {
     constexpr std::string_view token = "<|image_pad|>";
     std::string text;
@@ -1413,6 +1449,7 @@ int main() {
     int failures                  = 0;
     failures += test_official_tokenizer_merge();
     failures += test_bpe_merge_order();
+    failures += test_boundary_aware_tokenization();
     failures += test_repeated_special_tokens_scan_linearly();
     failures += test_official_chat_template();
     failures += test_ordered_instruction_turns();
