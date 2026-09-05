@@ -111,6 +111,9 @@ allocation:
 ./build/bench/ninfer_linear_bench \
   --qtype q4 --policy a16 --n 3456 --k 1152 \
   --sweep 4:512:4 --csv-out profiles/bench/q4_vision_qkv.csv
+./build/bench/ninfer_linear_bench \
+  --qtype w8 --policy a16 --n 248320 --k 5120 \
+  --sweep 48:65:1 --warmup 5 --repeat 30
 ```
 
 The registered suites run representative public Linear shapes for one or both exact products.
