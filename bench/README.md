@@ -282,6 +282,9 @@ cmake --build build --parallel --target ninfer_gdn_input_proj_conv_snapshot_benc
   --warmup 10 --repeat 100 \
   --csv-out profiles/bench/gdn_input_proj_conv_snapshot.csv
 ./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
+  --format q4q5 --form record --tokens 8 --batch 2 \
+  --execution graph --cache cold --warmup 10 --repeat 100
+./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
   --format nvfp4 --nvfp4-policy a4 --sweep 1:17 \
   --execution graph --cache cold --warmup 10 --repeat 100
 ./build/bench/ninfer_gdn_input_proj_conv_snapshot_bench \
