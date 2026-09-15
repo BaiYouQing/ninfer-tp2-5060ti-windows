@@ -35,6 +35,7 @@ enum class WeightsProfile : std::uint8_t {
     Qwen38GroupwiseInt,
     Qwen36Nvfp4,
     Qwen38Nvfp4,
+    Qwen38Nvfp4W4A4,   // 本 fork：自有 W4A4 产物（attention/GDN 全 NVFP4、无 BF16 例外）
 };
 
 using Frontend       = qwen3_6::Frontend;
