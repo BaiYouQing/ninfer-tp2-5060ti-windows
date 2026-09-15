@@ -285,7 +285,8 @@ void bind_groupwise_text_layers(artifact::Binder& binder, BindingPlan& out) {
 }
 
 void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out,
-                             bool bf16_exceptions = true) {
+                             bool bf16_exceptions = true, bool fp8_attention = false) {
+    constexpr NumericFormat kFp8Attention = NumericFormat::FP8_E4M3FN_ROW_BF16S;
     for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
         TextLayerPlan& target    = out.text_layers[layer];
         const std::string prefix = "text/layers/" + std::to_string(layer) + "/";
@@ -297,6 +298,9 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out,
             if (bf16_exceptions && is_early_attention_input(layer)) {
                 input = bind_weight(binder, prefix + "attention/query_key_gate_value",
                                     NumericFormat::BF16, {14336, 5120});
+            } else if (fp8_attention) {
+                input = bind_weight(binder, prefix + "attention/query_key_gate_value", kFp8Attention,
+                                    {14336, 5120});
             } else {
                 input = bind_nvfp4_weight(
                     binder, prefix + "attention/query_key_gate_value", 14336, 5120,
@@ -311,6 +315,9 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out,
             if (bf16_exceptions && is_bf16_attention_output(layer)) {
                 target.attention.output = bind_weight(binder, prefix + "attention/output",
                                                       NumericFormat::BF16, {5120, 6144});
+            } else if (fp8_attention) {
+                target.attention.output =
+                    bind_weight(binder, prefix + "attention/output", kFp8Attention, {5120, 6144});
             } else {
                 target.attention.output =
                     bind_nvfp4_weight(binder, prefix + "attention/output", 5120, 6144,
@@ -331,14 +338,20 @@ void bind_nvfp4_text_layers(artifact::Binder& binder, BindingPlan& out,
             };
             target.gdn.input_projection = FusedGdnInputProjectionPlan{
                 .query_key_value_z =
-                    bind_nvfp4_weight(binder, prefix + "gdn/query_key_value_z", 16384, 5120,
-                                      prefix + "gdn/input_projection/input_scale_divisor"),
+                    fp8_attention
+                        ? bind_weight(binder, prefix + "gdn/query_key_value_z", kFp8Attention,
+                                      {16384, 5120})
+                        : bind_nvfp4_weight(binder, prefix + "gdn/query_key_value_z", 16384, 5120,
+                                            prefix + "gdn/input_projection/input_scale_divisor"),
             };
             target.gdn.norm = artifact::bind_device_tensor(binder, prefix + "gdn/norm",
                                                            NumericFormat::BF16, {128});
             if (bf16_exceptions && is_bf16_gdn_output(layer)) {
                 target.gdn.output =
                     bind_weight(binder, prefix + "gdn/output", NumericFormat::BF16, {5120, 6144});
+            } else if (fp8_attention) {
+                target.gdn.output =
+                    bind_weight(binder, prefix + "gdn/output", kFp8Attention, {5120, 6144});
             } else {
                 target.gdn.output =
                     bind_nvfp4_weight(binder, prefix + "gdn/output", 5120, 6144,
@@ -871,7 +884,8 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
         bind_nvfp4_text_layers(binder, out);
         break;
     case WeightsProfile::Qwen38Nvfp4W4A4:
-        bind_nvfp4_text_layers(binder, out, /*bf16_exceptions=*/false);
+        bind_nvfp4_text_layers(binder, out, /*bf16_exceptions=*/false,
+                               /*fp8_attention=*/true);
         break;
     case WeightsProfile::Qwen38Nvfp4:
         bind_qwen38_nvfp4_text_layers(binder, out);
