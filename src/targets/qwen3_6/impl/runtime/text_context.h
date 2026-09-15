@@ -331,6 +331,16 @@ public:
                              ops::GqaExecutionEnvelope envelope,
                              const std::array<Tensor, 2>& mtp_hidden,
                              const std::array<Tensor, 2>& logits, Tensor& draft_token);
+    // The tp2 batch forward: one batch of ids against one batch of previous hidden, on both ranks.
+    // Public for the reason this whole section is -- a caller outside this class (the MTP bridge)
+    // owns and names both frames. It is also what the tp2 MTP prefill itself uses, because a bridge
+    // IS a one-column MTP prefill chunk staged at the resumed frontier.
+    void mtp_prefill_chunk_tp2(const Tensor& ids, const std::array<Tensor, 2>& hidden,
+                               const std::array<Tensor, 2>& positions,
+                               const std::array<Tensor, 2>& rope_positions,
+                               ops::GqaExecutionEnvelope envelope, bool final_chunk,
+                               const std::array<Tensor, 2>* final_hidden,
+                               const std::array<Tensor, 2>* logits, Tensor* draft_token);
 private:
     void bind();
 
@@ -415,12 +425,6 @@ private:
                               const std::array<Tensor, 2>& rope_positions,
                               ops::GqaExecutionEnvelope envelope,
                               const std::array<Tensor, 2>& mtp_hidden);
-    void mtp_prefill_chunk_tp2(const Tensor& ids, const std::array<Tensor, 2>& hidden,
-                               const std::array<Tensor, 2>& positions,
-                               const std::array<Tensor, 2>& rope_positions,
-                               ops::GqaExecutionEnvelope envelope, bool final_chunk,
-                               const std::array<Tensor, 2>* final_hidden,
-                               const std::array<Tensor, 2>* logits, Tensor* draft_token);
     // Vocabulary-split proposal head: each rank computes its own half of the proposal logits and
     // one allgather leaves the FULL vector on both, because the winning row is a GLOBAL argmax
     // that can land in either half and `draft_head_token_ids` is replicated for exactly that

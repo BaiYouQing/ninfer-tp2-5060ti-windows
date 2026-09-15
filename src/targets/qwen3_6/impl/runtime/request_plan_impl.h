@@ -242,21 +242,17 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
         plan->reuse_base = 0;
     }
 
-    // MTP prefix reuse has no tensor-parallel implementation, for a reason narrower than the
-    // forward path: resuming a prefix runs the MTP BRIDGE, which drives the MTP head from the
-    // retained target hidden of the reused frontier. That hidden is a rank-0-only store
-    // (`tail_hidden_store` / `rewrite_checkpoint_hidden_store` live once, with all the other
-    // bookkeeping), and rank 1's MTP stem needs its own copy of it -- the stem's row-parallel fc
-    // contracts the normalized-HIDDEN half on device 1. Mirroring those two stores per lane is a
-    // separable change; until it lands, a tp2 MTP request that would resume instead re-prefills.
-    // The answer is identical, only the reuse saving is lost -- the same trade the zero-suffix
-    // downgrade above makes, and decided HERE for the same reason: a throw from inside prefill
-    // execution takes the whole executor down rather than failing one request.
-    if (tp != 1 && speculative_backend == SpeculativeBackend::Mtp &&
-        plan->reuse != ReusePath::FullReset) {
-        plan->reuse      = ReusePath::FullReset;
-        plan->reuse_base = 0;
-    }
+    // MTP prefix reuse at tp2 is implemented: the bridge drives the MTP head on BOTH ranks
+    // (`mtp_bridge_and_propose` takes the tp2 branch), and rank 1 gets its copy of the retained
+    // frontier hidden with one UVA device-to-device copy inside that bridge, because the value came
+    // from a finished request and cannot be re-derived. The readiness gate above still applies
+    // unchanged -- `mtp_kv_valid` must already reach the reuse frontier, which the bridge then
+    // re-establishes. Nothing here needs to downgrade tp2 MTP reuse any more.
+    //
+    // The zero-suffix downgrade above still stands and still guards the `AfterExactHit` case: a
+    // reuse that covers the whole prompt samples the bonus token from a RESTORED hidden through the
+    // vocabulary-SPLIT output head, which needs both ranks' logits and a gather that path has no
+    // place to run. Such a plan is already a FullReset by the time this point is reached.
 
     if (is_rewrite_checkpoint_restore(plan->reuse) &&
         speculative_backend == SpeculativeBackend::DFlash &&

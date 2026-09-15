@@ -120,17 +120,133 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     if (!state.mtp_kv.valid() || !state.execution.io.mtp) {
         throw std::logic_error("MTP bridge requires MTP storage");
     }
-    if (state.execution.peer != nullptr) {
-        // Unreachable backstop, and deliberately kept as one. The bridge resumes the MTP head
-        // from a RETAINED target hidden, which lives only in rank 0's tail/checkpoint stores; the
-        // planner therefore downgrades every tp2 MTP prefix reuse to a full reset before a bridge
-        // can be staged (request_plan_impl.h). Throwing from inside prefill execution would take
-        // the executor down rather than fail one request, which is why the decision is made there.
-        throw std::logic_error("MTP bridge has no tensor-parallel path in this build");
-    }
     if (rope_position.size() != 3) {
         throw std::invalid_argument("MTP bridge requires one three-axis rope position");
     }
+
+    // --- tp == 2 --------------------------------------------------------------------------------
+    // The same bridge on both ranks. The MTP layer's tp2 leaves are the ones the decode round and
+    // the tp2 MTP prefill already use, so only two things differ from the single-device path below:
+    // every per-rank tensor is passed as an explicit pair, and rank 1's copy of the RETAINED
+    // frontier hidden has to exist. That value came from a request that has already finished, so it
+    // cannot be re-derived here the way the tp2 prefill derives its own final hidden -- it MOVES,
+    // with one UVA device-to-device copy issued on rank 1's stream (ops::allreduce's pull_peer
+    // moves bytes the same way; cudaMemcpyPeerAsync is the entry point CUDA 13.1 rejects inside a
+    // capture region, and keeping peer movement on one mechanism keeps this predictable).
+    std::optional<TpExecution> tp = tp_execution(state.execution);
+    if (tp) {
+        // The per-sequence MTP KV window is request state, so it comes from the PrefillContext
+        // rather than from the process-lifetime peer core -- same reason, same check as
+        // `prefill_text_chunk`. Without this the peer view is default-empty and the tp2 MTP forward
+        // rejects the bridge with "MTP prefill is not enabled".
+        tp->mtp_kv = state.mtp_kv_peer;
+        if (tp->mtp_kv.valid() != state.mtp_kv.valid()) {
+            throw std::logic_error("tensor-parallel MTP KV windows disagree between ranks");
+        }
+        if (!tp->io->mtp.has_value()) {
+            throw std::logic_error("tensor-parallel MTP bridge requires a peer MTP frame");
+        }
+        if (next_embedding != nullptr) {
+            throw std::logic_error("MTP bridge input embeddings have no tensor-parallel path");
+        }
+        // The tp2 MTP chunk takes rope positions as a FLAT per-token array (its own caller passes the
+        // cache positions for both), while the single-device path below takes the three MRoPE axes.
+        // For text the three axes are equal, which is what makes the flat form equivalent; guard it
+        // so a future multimodal case fails loudly instead of rotating by the wrong axis. Vision is
+        // already rejected at tp2, so this can only fire if that changes.
+        if (rope_position[0] != rope_position[1] || rope_position[0] != rope_position[2]) {
+            throw std::logic_error("MTP bridge rope axes disagree, and tp2 carries only one");
+        }
+        std::array<WorkspaceArena*, 2> area = {&state.execution.work, tp->work};
+        std::array<DeviceContext*, 2> dev   = {&state.execution.device, tp->device};
+
+        auto keep_0 = state.execution.work.scope();
+        auto keep_1 = tp->work->scope();
+        std::array<Tensor, 2> hidden_pair;
+        std::array<Tensor, 2> position_pair;
+        std::array<Tensor, 2> rope_pair;
+        hidden_pair[0] = previous_hidden;
+        hidden_pair[1] = area[1]->alloc(DType::BF16, {previous_hidden.ne[0], 1});
+        for (std::size_t rank = 0; rank < 2; ++rank) {
+            position_pair[rank] = area[rank]->alloc(DType::I32, {1});
+            rope_pair[rank]     = area[rank]->alloc(DType::I32, {1});
+        }
+        for (std::size_t rank = 0; rank < 2; ++rank) {
+            const CurrentDevice restore;
+            CUDA_CHECK(cudaSetDevice(dev[rank]->device));
+            if (rank != 0) {
+                CUDA_CHECK(cudaMemcpyAsync(hidden_pair[rank].data, previous_hidden.data,
+                                           previous_hidden.bytes(), cudaMemcpyDeviceToDevice,
+                                           dev[rank]->stream));
+            }
+            ops::set_i32_scalar(position_pair[rank], position, dev[rank]->stream);
+            ops::set_i32_scalar(rope_pair[rank], rope_position[0], dev[rank]->stream);
+        }
+
+        TextContext card(state.execution.device, state.execution.model, state.execution.work,
+                         state.execution.rope_frequency, state.text_kv,
+                         state.execution.linear_attention, state.execution.io,
+                         state.execution.prefill_hidden, state.execution.prefill_chunk,
+                         state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache,
+                         &*tp);
+        configure_text_card(card, state.execution, state.sampling, state.current_state_slot,
+                            state.rewrite_checkpoint_state_slot, state.mtp_proposal_extent);
+
+        std::array<Tensor, 2> mtp_hidden = {state.execution.io.mtp->ar_hidden,
+                                            tp->io->mtp->ar_hidden};
+        std::array<Tensor, 2> logits_pair;
+        Tensor draft0;
+        const auto bridge_visible = static_cast<std::uint32_t>(position + 1);
+        const ops::GqaExecutionEnvelope bridge_envelope{bridge_visible, bridge_visible};
+        if (build_proposal) {
+            logits_pair[0] = state.execution.io.logits.slice(1, 0, 1);
+            logits_pair[1] = tp->io->logits.slice(1, 0, 1);
+            draft0         = state.execution.io.mtp->draft_tokens.slice(0, 0, 1);
+        }
+        card.mtp_prefill_chunk_tp2(next_token, hidden_pair, position_pair, rope_pair,
+                                   bridge_envelope, build_proposal,
+                                   build_proposal ? &mtp_hidden : nullptr,
+                                   build_proposal ? &logits_pair : nullptr,
+                                   build_proposal ? &draft0 : nullptr);
+        if (!build_proposal) { return; }
+
+        if (state.mtp_proposal_extent == 0 ||
+            state.mtp_proposal_extent >
+                static_cast<std::uint32_t>(state.execution.io.mtp->draft_tokens.ne[0])) {
+            throw std::logic_error("MTP bridge proposal extent is outside the configured window");
+        }
+        std::array<Tensor, 2> ar_position = {state.execution.io.mtp->position.slice(0, 0, 1),
+                                             tp->io->mtp->position.slice(0, 0, 1)};
+        for (std::size_t rank = 0; rank < 2; ++rank) {
+            const CurrentDevice restore;
+            CUDA_CHECK(cudaSetDevice(dev[rank]->device));
+            ops::set_i32_scalar(ar_position[rank], position + 1, dev[rank]->stream);
+        }
+        for (int i = 1; i < static_cast<int>(state.mtp_proposal_extent); ++i) {
+            auto scratch_0 = state.execution.work.scope();
+            auto scratch_1 = tp->work->scope();
+            Tensor previous_token = state.execution.io.mtp->draft_tokens.slice(0, i - 1, 1);
+            Tensor next_draft     = state.execution.io.mtp->draft_tokens.slice(0, i, 1);
+            std::array<Tensor, 2> next_hidden;
+            for (std::size_t rank = 0; rank < 2; ++rank) {
+                next_hidden[rank] = area[rank]->alloc(DType::BF16, {previous_hidden.ne[0], 1});
+            }
+            const auto visible = static_cast<std::uint32_t>(position + i + 1);
+            const ops::GqaExecutionEnvelope envelope{visible, visible};
+            card.mtp_forward_ar_step(previous_token, mtp_hidden, ar_position, envelope, next_hidden,
+                                     logits_pair, next_draft);
+            for (std::size_t rank = 0; rank < 2; ++rank) {
+                const CurrentDevice restore;
+                CUDA_CHECK(cudaSetDevice(dev[rank]->device));
+                CUDA_CHECK(cudaMemcpyAsync(mtp_hidden[rank].data, next_hidden[rank].data,
+                                           mtp_hidden[rank].bytes(), cudaMemcpyDeviceToDevice,
+                                           dev[rank]->stream));
+                ops::increment_i32_scalar(ar_position[rank], dev[rank]->stream);
+            }
+        }
+        return;
+    }
+
     state.execution.work.reset();
     TextContext card(state.execution.device, state.execution.model, state.execution.work,
                      state.execution.rope_frequency, state.text_kv,
