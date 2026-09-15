@@ -94,7 +94,9 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
         return WeightsProfile::Qwen36Nvfp4;
     }
     if (identity.model_id == qwen3_8_model_id && identity.weights_id == "nvfp4") {
-        return WeightsProfile::Qwen38Nvfp4;
+        // 诊断：HF 上 Ostfralla 发布的 qwen3.8-27b/nvfp4（18.3 GiB）是 Qwen3.6 形状
+        // （NVFP4 注意力 + W8 端点 + a/b 分开），所以这里映射到 Qwen36Nvfp4 档来复现它。
+        return WeightsProfile::Qwen36Nvfp4;
     }
     // 本 fork：自有微调产物（ModelOpt W4A4 → .ninfer）。格式与 Qwen3.6 NVFP4 档相同，
     // 差别只在 attention/GDN 投影**没有** BF16 例外层（那 9 层在本产物里保持 NVFP4，
