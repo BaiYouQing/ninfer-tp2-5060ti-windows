@@ -96,6 +96,11 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
     if (identity.model_id == qwen3_8_model_id && identity.weights_id == "nvfp4") {
         return WeightsProfile::Qwen38Nvfp4;
     }
+    // 本 fork：我们自己的微调产物（ModelOpt W4A4 → .ninfer，attention/GDN 全 NVFP4、
+    // 端点与 MTP 为 W8/Q4 混合），复用 Qwen3.6 的 NVFP4 档语义。
+    if (identity.model_id == qwen3_8_model_id && identity.weights_id == "nvfp4-w4a4") {
+        return WeightsProfile::Qwen36Nvfp4;
+    }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");
 }
