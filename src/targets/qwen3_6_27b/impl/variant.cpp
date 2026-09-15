@@ -45,7 +45,8 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
     }
 }
 
-constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
+// 临时诊断实验：NVFP4 权重强制走 A16（W4A16），隔离「激活量化 A4」路径
+constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::A16Only;
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
 
 ops::LinearPolicy text_policy(const Weight& weight) {
