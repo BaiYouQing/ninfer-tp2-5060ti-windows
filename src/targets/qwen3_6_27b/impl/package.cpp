@@ -94,12 +94,7 @@ Package::WeightsProfile Package::resolve_weights(const artifact::ArtifactIdentit
         return WeightsProfile::Qwen36Nvfp4;
     }
     if (identity.model_id == qwen3_8_model_id && identity.weights_id == "nvfp4") {
-        // 本 fork 的决定：qwen3.8-27b/nvfp4 走 Qwen3.6 的 NVFP4 档。
-        // 原因：llm-compressor 路线（Ostfralla/Qwen3.8-27B-NVFP4-NInfer，recipe
-        // qwen3_8_27b_nvfp4-v1）把词表端点造成 W8G32_F16S，与 Qwen38Nvfp4 档要求的
-        // FP8_E4M3FN_ROW_BF16S 不符；上游后来分档是为 unsloth 的 FP8 端点源服务。
-        // 若改用 neroued 官方 artifact（FP8 端点），应改回 Qwen38Nvfp4。
-        return WeightsProfile::Qwen36Nvfp4;
+        return WeightsProfile::Qwen38Nvfp4;
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' is not supported by target '" + std::string(target_key) + "'");
