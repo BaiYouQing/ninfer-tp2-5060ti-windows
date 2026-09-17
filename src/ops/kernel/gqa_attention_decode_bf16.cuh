@@ -315,15 +315,17 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                 if constexpr (Fp8Key) {
                     // fp8 的 K：历史 token 从量化 cache 反量化读；本步新 token 直接取输入（沿用
                     // bf16 路径的 from_new 例外 —— 写侧那份量化副本留给后续轮次当"历史"读）。
-                    const int new_token = key - first_pos;
-                    bool from_new       = false;
+                    bool staged_from_input = false;
                     if constexpr (CacheInput::writes_cache) {
-                        from_new = new_token >= 0 && new_token < valid_tokens && key >= first_pos;
+                        const int new_token = key - first_pos;
+                        if (new_token >= 0 && new_token < valid_tokens && key >= first_pos) {
+                            const std::int64_t off =
+                                gqa_kv_new_index<Geometry>(kv_head, d, new_token);
+                            ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
+                            staged_from_input = true;
+                        }
                     }
-                    if (from_new) {
-                        const std::int64_t off = gqa_kv_new_index<Geometry>(kv_head, d, new_token);
-                        ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
-                    } else {
+                    if (!staged_from_input) {
                         const __half k_scale = k_scale_pages[kv_cache_fp8_scale_index<Geometry>(
                             physical_page, kv_head, key & kPagedKVPageMask)];
                         const auto* k_codes = reinterpret_cast<const std::uint8_t*>(cache_k);
