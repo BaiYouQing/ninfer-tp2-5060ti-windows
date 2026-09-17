@@ -2,7 +2,6 @@
 #include "ninfer/ops/gqa_attention.h"
 
 #include "core/layout.h"
-#include "ops/kernel/kv_codec_fp8.cuh"
 #include "ops/launcher/gqa_attention.h"
 
 #include <algorithm>
@@ -60,11 +59,13 @@ void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char
 }
 
 std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_heads, const char* op) {
-    // 支持的组合：两侧完全同档（bf16 / int8），或 k16v8（K=bf16 无 scale + V=e4m3 每 256 维 1 scale）。
+    // 支持的组合：两侧完全同档（bf16 / int8），或 k16v8（K=bf16 无 scale + V=e4m3）。
+    // V 侧 fp8 的 scale 密度（每 256 维 1 个）由 decoder_state 的 validate_kv_side 在建池时校验，
+    // 这里只看 dtype 组合（避免 ops/wrapper 依赖含 device 助手的 codec 头）。
     const bool same_side = cache.k_dtype == cache.v_dtype &&
                            cache.k_quant_group == cache.v_quant_group;
     const bool k16v8     = cache.k_dtype == DType::BF16 && cache.k_quant_group == 0 &&
-                       cache.v_dtype == DType::FP8_E4M3FN && cache.v_quant_group == kKVCacheFp8Group;
+                       cache.v_dtype == DType::FP8_E4M3FN;
     if (!same_side && !k16v8) {
         throw std::invalid_argument(std::string(op) +
                                     ": unsupported per-side KV codec combination");
@@ -126,11 +127,13 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
 
 std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
                                    const char* op) {
-    // 支持的组合：两侧完全同档（bf16 / int8），或 k16v8（K=bf16 无 scale + V=e4m3 每 256 维 1 scale）。
+    // 支持的组合：两侧完全同档（bf16 / int8），或 k16v8（K=bf16 无 scale + V=e4m3）。
+    // V 侧 fp8 的 scale 密度（每 256 维 1 个）由 decoder_state 的 validate_kv_side 在建池时校验，
+    // 这里只看 dtype 组合（避免 ops/wrapper 依赖含 device 助手的 codec 头）。
     const bool same_side = cache.k_dtype == cache.v_dtype &&
                            cache.k_quant_group == cache.v_quant_group;
     const bool k16v8     = cache.k_dtype == DType::BF16 && cache.k_quant_group == 0 &&
-                       cache.v_dtype == DType::FP8_E4M3FN && cache.v_quant_group == kKVCacheFp8Group;
+                       cache.v_dtype == DType::FP8_E4M3FN;
     if (!same_side && !k16v8) {
         throw std::invalid_argument(std::string(op) +
                                     ": unsupported per-side KV codec combination");
