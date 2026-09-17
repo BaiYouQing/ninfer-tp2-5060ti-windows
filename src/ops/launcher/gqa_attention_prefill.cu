@@ -138,23 +138,6 @@ void gqa_kv_append_launch_for(const Tensor& k, const Tensor& v, const Tensor& po
                     static_cast<__half*>(cache_v_scale.data), tokens);
         }
         CUDA_CHECK(cudaGetLastError());
-    } else if (cache.v_dtype == DType::FP8_E4M3FN) {
-        // k16v8：K 仍写 bf16，V 写 e4m3 + 每 256 维 1 个 fp16 scale。
-        constexpr int kBlock           = Geometry::KVHeads == 4 ? 128 : 96;
-        constexpr int kFillVecElems    = 8;
-        const std::int64_t kv_elements = static_cast<std::int64_t>(tokens) * Geometry::KVHeads *
-                                         (kGqaPrefillHeadDim / kFillVecElems);
-        const int fill_grid =
-            static_cast<int>(div_up(kv_elements, static_cast<std::int64_t>(kBlock)));
-        gqa_attention_prefill_fill_bf16_kernel<Geometry, Metadata, true>
-            <<<fill_grid, kBlock, 0, stream>>>(static_cast<const __nv_bfloat16*>(k.data),
-                                               static_cast<const __nv_bfloat16*>(v.data),
-                                               static_cast<const std::int32_t*>(positions.data),
-                                               metadata, static_cast<__nv_bfloat16*>(cache_k.data),
-                                               static_cast<__nv_bfloat16*>(cache_v.data),
-                                               static_cast<__half*>(cache.v_scale_pages.data),
-                                               tokens);
-        CUDA_CHECK(cudaGetLastError());
     } else if (cache.k_dtype == DType::FP8_E4M3FN) {
         // kvfp8：K/V 两侧都写 e4m3 + 每 256 维 1 个 fp16 scale。
         constexpr int kBlock           = Geometry::KVHeads == 4 ? 128 : 96;
