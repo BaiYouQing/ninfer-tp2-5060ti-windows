@@ -18,10 +18,12 @@
 
 #include "ops/kernel/paged_kv_address.cuh"
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
 #include <cstdint>
+#include <cstring>
 
 namespace ninfer::ops {
 
@@ -101,6 +103,25 @@ __device__ __forceinline__ float kv_cache_fp8_warp_absmax(float lane_absmax) {
         m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, offset));
     }
     return m;
+}
+
+// 读侧：8 个 e4m3 code（8 B，对应 8 维）→ 8 个 bf16，打包成 int4（16 B），可直接 store_vec
+// 到 bf16 的 smem tile —— 与 bf16 路径的 16 B chunk 粒度一致，所以读循环的结构不用改。
+__device__ __forceinline__ int4 kv_cache_fp8_dequant_code8_to_bf16x8(const std::uint8_t* codes8,
+                                                                     __half scale) {
+    const __half2 scale2 = __halves2half2(scale, scale);
+    int4 packed;
+    std::int32_t* words = reinterpret_cast<std::int32_t*>(&packed);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        std::uint16_t code2 = 0;
+        code2 |= static_cast<std::uint16_t>(codes8[2 * i]);
+        code2 |= static_cast<std::uint16_t>(codes8[2 * i + 1]) << 8;
+        const __half2 values = __hmul2(kv_cache_fp8_code2_to_half2(code2), scale2);
+        const __nv_bfloat162 packed_bf16 = __float22bfloat162_rn(__half22float2(values));
+        std::memcpy(&words[i], &packed_bf16, sizeof(packed_bf16));
+    }
+    return packed;
 }
 
 } // namespace ninfer::ops
