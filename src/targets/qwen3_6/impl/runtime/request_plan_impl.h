@@ -295,16 +295,33 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
     // the resumed suffix the very chunk a full prefill would have computed. A retreat to zero means
     // nothing is left to reuse.
     //
-    // This runs AFTER the rewrite-checkpoint decisions above on purpose: those compare the desired
-    // frontier against the reuse base, so aligning first would turn a usable retained checkpoint
-    // into a "not yet captured" one and the prefill would then fail to find it.
-    if (plan->reuse != ReusePath::FullReset && plan->reuse_base != 0 && prefill_chunk > 0) {
+    // It applies to the resident-prefix path (`AppendAtFrontier`) only. A rewrite-checkpoint
+    // restore carries a *state snapshot* -- the recurrent GDN slots plus the retained tail hidden --
+    // that lives at the checkpoint frontier, and the restore path installs it verbatim
+    // (`trim_sequence_kv` + `copy_slot` truncate the KV to the reuse base before the suffix runs).
+    // Retreating the base away from that frontier would therefore keep the frontier's recurrent
+    // state while re-running the tokens in between, i.e. double-count them, which is why the
+    // execution guard demands `checkpoint.frontier == reuse_base`. Leaving the base where the
+    // checkpoint is keeps reuse working; the numeric grid argument is instead satisfied by
+    // retreating the *capture* side (see below) so both sides name the same boundary.
+    if (plan->reuse != ReusePath::FullReset && plan->reuse_base != 0 && prefill_chunk > 0 &&
+        !is_rewrite_checkpoint_restore(plan->reuse)) {
         const std::uint32_t aligned = plan->reuse_base - plan->reuse_base % prefill_chunk;
         if (aligned == 0) {
             plan->reuse      = ReusePath::FullReset;
             plan->reuse_base = 0;
         } else {
             plan->reuse_base = aligned;
+        }
+    }
+    // The checkpoint decisions above may have selected an action that requires a live reuse, while
+    // the alignment just downgraded the plan to a full reset. Keep the two consistent: a dropped
+    // reuse cannot retain or reclassify a checkpoint. (Ignoring this is what made a repeated prompt
+    // throw from plan validation -- and an exception at that point takes the whole executor down.)
+    if (plan->reuse == ReusePath::FullReset) {
+        if (plan->rewrite_checkpoint_action == RewriteCheckpointAction::KeepExisting ||
+            plan->rewrite_checkpoint_action == RewriteCheckpointAction::ReclassifyExisting) {
+            plan->rewrite_checkpoint_action = RewriteCheckpointAction::Drop;
         }
     }
 
