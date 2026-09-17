@@ -290,6 +290,7 @@ public:
     const std::uint32_t draft_window;
     const SpeculativeBackend speculative_backend;
     const DType kv_dtype;
+    const DType kv_value_dtype;
     const std::int32_t kv_quant_group;
     const ProposalHead proposal_head;
     const bool vision_enabled;

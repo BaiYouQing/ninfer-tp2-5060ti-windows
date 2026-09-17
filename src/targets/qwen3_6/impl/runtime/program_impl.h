@@ -244,7 +244,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in,
       capacity(plan.capacity), kv_capacity(plan.kv_capacity),
       max_concurrency(plan.max_concurrency), prefill_chunk(plan.prefill_chunk),
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
-      kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
+      kv_dtype(plan.kv_dtype), kv_value_dtype(plan.kv_v_dtype), kv_quant_group(plan.kv_quant_group),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), kv_payload_bytes(plan.persistent.kv_payload_bytes),
       gdn_state_bytes(linear_attention_state_bytes(plan.persistent.decoder.linear_attention)),
@@ -2840,7 +2840,12 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.effective_max_context = effective_max_context;
     out.yarn_mscale           = yarn_mscale;
     out.kv_capacity           = kv_capacity;
-    out.kv_cache = kv_dtype == DType::BF16 ? KvCacheStorage::BFloat16 : KvCacheStorage::Int8Group64;
+    // 档位反查按 per-side 组合：K 侧决定主档，k16v8 由 V 侧是 e4m3 区分。
+    out.kv_cache = kv_dtype == DType::BF16
+                       ? (kv_value_dtype == DType::FP8_E4M3FN ? KvCacheStorage::Bf16KeyFp8Value
+                                                              : KvCacheStorage::BFloat16)
+                   : kv_dtype == DType::FP8_E4M3FN ? KvCacheStorage::Fp8E4M3Row256
+                                                   : KvCacheStorage::Int8Group64;
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

@@ -85,7 +85,7 @@ std::int32_t gqa_small_t_launch_capacity(GqaExecutionEnvelope envelope, std::int
 }
 
 template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
-          typename CacheInput, bool Fp8Value = false>
+          typename CacheInput, bool Fp8Value = false, bool Fp8Key = false>
 void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                             PagedKVBatchLayerView cache, const GqaSmallTInvocation& invocation,
                             std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
@@ -102,6 +102,7 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
             static_cast<__nv_bfloat16*>(cache_v.data),
+            Fp8Key ? static_cast<__half*>(cache.k_scale_pages.data) : nullptr,
             Fp8Value ? static_cast<__half*>(cache.v_scale_pages.data) : nullptr,
             static_cast<const std::int32_t*>(cache.block_tables.data),
         invocation.valid_columns == nullptr
@@ -225,6 +226,8 @@ bool gqa_attention_uses_small_t(std::int32_t tokens) { return tokens >= 1 && tok
 
 std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
                                           DType cache_dtype, GqaExecutionEnvelope envelope) {
+    // fp8 的 QK 走与 bf16 相同的 MMA 与 staging，split 策略也一致（kvfp8 的 K 侧就是 FP8）。
+    if (cache_dtype == DType::FP8_E4M3FN) { cache_dtype = DType::BF16; }
     if (tokens < 1 || tokens > 6 || (cache_dtype != DType::BF16 && cache_dtype != DType::I8) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys) {
         throw std::invalid_argument("gqa_attention split capacity: invalid profile");
@@ -255,6 +258,12 @@ void gqa_attention_small_t_launch_for(const Tensor& q, CacheInput input, const T
                 launch_tc_partial_i8<Geometry, (TOKENS), MultiBatch, Masked>(                      \
                     q, input, pos, scale, cache, invocation, logical_capacity,                     \
                     implementation_window, splits, partial_acc, partial_m, partial_l, stream);     \
+            } else if (cache.k_dtype == DType::FP8_E4M3FN) {                                         \
+                /* kvfp8：K/V 两侧都是 e4m3 code + 每 256 维 1 个 fp16 scale */                        \
+                launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked,              \
+                                       CacheInput, true, true>(                                      \
+                    q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
+                    partial_acc, partial_m, partial_l, stream);                                    \
             } else if (cache.v_dtype == DType::FP8_E4M3FN) {                                       \
                 /* k16v8：K=bf16，V=e4m3 + 每 256 维 1 个 fp16 scale */                            \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked,            \

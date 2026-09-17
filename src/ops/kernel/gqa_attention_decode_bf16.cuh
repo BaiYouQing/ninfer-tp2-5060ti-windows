@@ -16,10 +16,11 @@
 namespace ninfer::ops {
 
 template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
-          typename CacheInput, bool Fp8Value = false>
+          typename CacheInput, bool Fp8Value = false, bool Fp8Key = false>
 __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_kernel(
     const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
-    __nv_bfloat16* cache_v, __half* v_scale_pages, const std::int32_t* block_tables,
+    __nv_bfloat16* cache_v, __half* k_scale_pages, __half* v_scale_pages,
+    const std::int32_t* block_tables,
     const std::int32_t* valid_columns, const std::int32_t* table_rows, std::int32_t table_stride,
     std::int32_t tokens, std::int32_t full_width, std::int32_t column_begin,
     std::int32_t logical_capacity, float scale, __nv_bfloat16* partial_acc, float* partial_m,
@@ -173,7 +174,35 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                 physical_page     = __shfl_sync(FullMask, physical_page, 0);
                 const std::int64_t cache_off =
                     gqa_cache_index<Geometry>(physical_page, kv_head, d, p_tok & kPagedKVPageMask);
-                store_vec(&cache_k[cache_off], load_vec<int4>(&input.k[new_off]));
+                if constexpr (Fp8Key) {
+                    // K 侧 fp8（kvfp8）：与 V 侧同构 —— 整 256 维共用一个 fp16 scale，
+                    // 一个 warp 覆盖一个 token 的 32 个 8 元素 chunk ⇒ warp 归约 absmax。
+                    const int4 k_new            = load_vec<int4>(&input.k[new_off]);
+                    const __nv_bfloat16* k_bf16 = reinterpret_cast<const __nv_bfloat16*>(&k_new);
+                    float k_lane_absmax         = 0.0f;
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) {
+                        k_lane_absmax = fmaxf(k_lane_absmax, fabsf(__bfloat162float(k_bf16[i])));
+                    }
+                    const KVCacheFp8QuantParams k_params =
+                        kv_cache_fp8_quant_params(kv_cache_fp8_warp_absmax(k_lane_absmax));
+                    auto* k_codes = reinterpret_cast<std::uint8_t*>(cache_k);
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        const std::uint16_t code2 =
+                            kv_cache_fp8_quant_code2(__bfloat162float(k_bf16[2 * i]),
+                                                     __bfloat162float(k_bf16[2 * i + 1]),
+                                                     k_params.inverse_scale);
+                        k_codes[cache_off + 2 * i]     = static_cast<std::uint8_t>(code2 & 0xFFu);
+                        k_codes[cache_off + 2 * i + 1] = static_cast<std::uint8_t>(code2 >> 8);
+                    }
+                    if (lane == 0) {
+                        k_scale_pages[kv_cache_fp8_scale_index<Geometry>(
+                            physical_page, kv_head, p_tok & kPagedKVPageMask)] = k_params.scale;
+                    }
+                } else {
+                    store_vec(&cache_k[cache_off], load_vec<int4>(&input.k[new_off]));
+                }
                 if constexpr (Fp8Value) {
                     // V 侧 fp8：整个 256 维向量共用一个 fp16 scale。一个 warp 覆盖一个 token 的
                     // 32 个 8 元素 chunk（D/8 == 32），所以 absmax 走 warp 归约（lane 内先各自归约）。
@@ -268,28 +297,18 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
             __nv_bfloat16* k_dst = &k_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
             __nv_bfloat16* v_dst = &v_s[key_l * D + gqa_small_t_tc_swz(key_l, d)];
             if (key >= split_start && key < split_end) {
-                if constexpr (Fp8Value) {
-                    // fp8：历史 token 与新 token 的 V 都从量化 cache 回读（写入时已量化，
-                    // 与 i8 内核"不做 from_new 特例"的做法一致）；K 侧保持原逻辑。
-                    const std::int64_t off = gqa_cache_index<Geometry>(
-                        physical_page, kv_head, d, key & kPagedKVPageMask);
-                    const __half v_scale = v_scale_pages[kv_cache_fp8_scale_index<Geometry>(
+                const std::int64_t cache_off = gqa_cache_index<Geometry>(
+                    physical_page, kv_head, d, key & kPagedKVPageMask);
+                // K 与 V 的档位按侧独立判断：k16v8 只有 V 是 fp8，kvfp8 两侧都是。
+                if constexpr (Fp8Key) {
+                    // fp8 的 K 一律从量化 cache 回读：新 token 在写侧已量化落盘，
+                    // 不存在 from_new 的 bf16 例外（与 i8 内核一致）。
+                    const __half k_scale = k_scale_pages[kv_cache_fp8_scale_index<Geometry>(
                         physical_page, kv_head, key & kPagedKVPageMask)];
-                    const auto* v_codes = reinterpret_cast<const std::uint8_t*>(cache_v);
-                    const uint2 code8   = load_vec<uint2>(&v_codes[off]);
-                    store_vec(v_dst, kv_cache_fp8_dequant_code8_to_bf16x8(
-                                         reinterpret_cast<const std::uint8_t*>(&code8), v_scale));
-                    if constexpr (CacheInput::writes_cache) {
-                        const int new_token = key - first_pos;
-                        const bool from_new =
-                            new_token >= 0 && new_token < valid_tokens && key >= first_pos;
-                        const std::int64_t k_off =
-                            from_new ? gqa_kv_new_index<Geometry>(kv_head, d, new_token) : off;
-                        ninfer::ops::cp_async<16>(
-                            k_dst, from_new ? &input.k[k_off] : &cache_k[k_off]);
-                    } else {
-                        ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                    }
+                    const auto* k_codes = reinterpret_cast<const std::uint8_t*>(cache_k);
+                    const uint2 k_code8 = load_vec<uint2>(&k_codes[cache_off]);
+                    store_vec(k_dst, kv_cache_fp8_dequant_code8_to_bf16x8(
+                                         reinterpret_cast<const std::uint8_t*>(&k_code8), k_scale));
                 } else if constexpr (CacheInput::writes_cache) {
                     const int new_token = key - first_pos;
                     const bool from_new =
@@ -297,18 +316,32 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                     if (from_new) {
                         const std::int64_t off = gqa_kv_new_index<Geometry>(kv_head, d, new_token);
                         ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
                     } else {
-                        const std::int64_t off = gqa_cache_index<Geometry>(
-                            physical_page, kv_head, d, key & kPagedKVPageMask);
-                        ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
+                        ninfer::ops::cp_async<16>(k_dst, &cache_k[cache_off]);
                     }
                 } else {
-                    const std::int64_t off = gqa_cache_index<Geometry>(physical_page, kv_head, d,
-                                                                       key & kPagedKVPageMask);
-                    ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                    ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
+                    ninfer::ops::cp_async<16>(k_dst, &cache_k[cache_off]);
+                }
+                if constexpr (Fp8Value) {
+                    // fp8 的 V 同样历史/新 token 都从量化 cache 回读。
+                    const __half v_scale = v_scale_pages[kv_cache_fp8_scale_index<Geometry>(
+                        physical_page, kv_head, key & kPagedKVPageMask)];
+                    const auto* v_codes = reinterpret_cast<const std::uint8_t*>(cache_v);
+                    const uint2 code8   = load_vec<uint2>(&v_codes[cache_off]);
+                    store_vec(v_dst, kv_cache_fp8_dequant_code8_to_bf16x8(
+                                         reinterpret_cast<const std::uint8_t*>(&code8), v_scale));
+                } else if constexpr (CacheInput::writes_cache) {
+                    const int new_token = key - first_pos;
+                    const bool from_new =
+                        new_token >= 0 && new_token < valid_tokens && key >= first_pos;
+                    if (from_new) {
+                        const std::int64_t off = gqa_kv_new_index<Geometry>(kv_head, d, new_token);
+                        ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
+                    } else {
+                        ninfer::ops::cp_async<16>(v_dst, &cache_v[cache_off]);
+                    }
+                } else {
+                    ninfer::ops::cp_async<16>(v_dst, &cache_v[cache_off]);
                 }
             } else {
                 store_vec(k_dst, make_int4(0, 0, 0, 0));

@@ -114,8 +114,7 @@ struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     DType kv_v_dtype                       = DType::BF16;
     std::int32_t kv_k_quant_group          = 0;
     std::int32_t kv_v_quant_group          = 0;
-    // 派生视图：attention workspace 的档位参数与对外报告目前只支持 K/V 同档；
-    // per-side 档位（k16v8 等）在内核读写入点接通前，由 planner 填充这里时显式拒绝。
+    // 派生视图：planner 按 K 侧填这里（路由选核以 K 侧为主）；V 侧的真值另存 kv_v_dtype。
     DType kv_dtype                         = DType::BF16;
     std::int32_t kv_quant_group            = 0;
     ProposalHead proposal_head             = ProposalHead::Full;
