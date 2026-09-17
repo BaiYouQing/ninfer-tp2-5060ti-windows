@@ -94,9 +94,9 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
                                 spec.kv_k_quant_group, spec.kv_v_quant_group, spec.kv_table_rows,
                                 spec.text_physical_page_groups);
     if (spec.enable_mtp) {
+        // TEMP(diag): MTP 层缓存强制 bf16 —— 用于定位 fp8 档下起草接受率崩塌是否来自 MTP 层。
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
-                                   spec.attention_head_dim, spec.kv_k_dtype, spec.kv_v_dtype,
-                                   spec.kv_k_quant_group, spec.kv_v_quant_group,
+                                   spec.attention_head_dim, DType::BF16, DType::BF16, 0, 0,
                                    spec.kv_table_rows, spec.mtp_physical_page_groups);
     }
     layout.linear_attention = plan_linear_attention_state_pool(builder, spec.linear_attention);
