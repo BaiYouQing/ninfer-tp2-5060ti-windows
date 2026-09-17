@@ -808,6 +808,34 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     return impl;
 }
 
+// KV 档位 → K/V 两侧共用的 (dtype, quant_group)。
+// Fp8E4M3Row256 / Bf16KeyFp8Value 是 per-side 档（K、V 的 codec 与 scale 密度都不同），
+// 需要先让 decoder_state 的 plan_cache 接受 per-side 描述；在那之前这里显式拒绝，
+// 绝不允许把新档位静默当成 int8 跑（那会给出"看起来正常但语义错误"的结果）。
+DType kv_cache_side_dtype(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16: return DType::BF16;
+    case KvCacheStorage::Int8Group64: return DType::I8;
+    case KvCacheStorage::Fp8E4M3Row256:
+    case KvCacheStorage::Bf16KeyFp8Value:
+        throw std::invalid_argument(
+            "kv-dtype fp8|k16v8 尚未接通：需要 per-side KV 描述（K/V 各自 codec 与 scale 密度）");
+    }
+    throw std::invalid_argument("unknown kv cache storage");
+}
+
+std::int32_t kv_cache_side_quant_group(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16: return 0;
+    case KvCacheStorage::Int8Group64: return qwen3_6::kKvQuantGroup;
+    case KvCacheStorage::Fp8E4M3Row256:
+    case KvCacheStorage::Bf16KeyFp8Value:
+        throw std::invalid_argument(
+            "kv-dtype fp8|k16v8 尚未接通：需要 per-side KV 描述（K/V 各自 codec 与 scale 密度）");
+    }
+    throw std::invalid_argument("unknown kv cache storage");
+}
+
 } // namespace
 
 std::unique_ptr<qwen3_6::detail::SequencePlannerImpl<Variant>>
@@ -822,8 +850,8 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
-        .kv_dtype       = options.kv_cache == KvCacheStorage::BFloat16 ? DType::BF16 : DType::I8,
-        .kv_quant_group = options.kv_cache == KvCacheStorage::BFloat16 ? 0 : qwen3_6::kKvQuantGroup,
+        .kv_dtype       = kv_cache_side_dtype(options.kv_cache),
+        .kv_quant_group = kv_cache_side_quant_group(options.kv_cache),
         .proposal_head  = options.speculative.proposal_head,
         .features       = qwen3_6::startup_features(options),
         .rope_mode      = options.rope_mode,

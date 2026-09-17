@@ -27,6 +27,11 @@ inline constexpr std::size_t kDefaultMediaLiveBytes   = 2ULL << 30;
 enum class KvCacheStorage : std::uint8_t {
     BFloat16,
     Int8Group64,
+    // 本 fork 追加的两档（K/V 的 codec 可以不同，所以引入 per-side KV 描述）：
+    //   Fp8E4M3Row256 - K/V 都是 E4M3，每 256 维 1 个 fp16 scale（对齐上游 fp8 档）
+    //   Bf16KeyFp8Value - K 用 BF16（无 scale）、V 用 E4M3（每 256 维 1 个 scale）
+    Fp8E4M3Row256,
+    Bf16KeyFp8Value,
 };
 
 enum class KvCapacityMode : std::uint8_t {
