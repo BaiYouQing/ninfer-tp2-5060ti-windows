@@ -450,7 +450,9 @@ Prefix reuse hits when the retained turn checkpoint covers the prompt: a repeate
 `cache=7872 reuse=restore_turn_checkpoint` and its time-to-first-token drops from 1788 ms to 71 ms.
 A reused prefill computes its suffix from the checkpoint frontier rather than from the full-prefill
 chunk grid, so a hit and a cold run can differ in the last bits (and occasionally in greedy text) —
-the same class of caveat as vLLM/SGLang prefix caching.
+the same class of caveat as vLLM/SGLang prefix caching. The hit is reported back in the response
+usage: OpenAI responses carry `usage.prompt_tokens_details.cached_tokens`, and Anthropic responses
+carry `usage.cache_read_input_tokens` (with `cache_creation_input_tokens` reported as 0).
 
 `/health` reports engine availability (`200 {"status":"ok"}` / `503 {"status":"unavailable"}`), and
 `apps/ninfer-serve` exits non-zero when the engine becomes unusable so a supervisor
@@ -718,7 +720,9 @@ Capabilities. All three registered model IDs support:
 - KV cache tiers `bf16`, `int8` (group-64), `fp8` (e4m3) and `k16v8` (BF16 keys + FP8 values);
 - model- and thinking-mode-aware official sampling defaults, with explicit greedy, temperature,
   top-k, top-p, min-p, and presence/frequency-penalty overrides;
-- compatible-prefix reuse, including MTP at `--tp 2`;
+- compatible-prefix reuse, including MTP at `--tp 2`, with the hit count reported as
+  `usage.prompt_tokens_details.cached_tokens` (OpenAI) / `usage.cache_read_input_tokens`
+  (Anthropic);
 - a `/health` endpoint that reports engine availability and a server that exits non-zero when the
   engine becomes unusable, so a supervisor can restart it;
 - OpenAI Responses Core, OpenAI Chat Completions, and Anthropic Messages, including streaming and

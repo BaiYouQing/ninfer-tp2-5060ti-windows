@@ -63,6 +63,11 @@ This tree continues from the TP2/YaRN fork above and adds:
   * a /health endpoint that reports engine availability, and a server that exits
     non-zero when the engine becomes unusable so a supervisor restarts it --
     src/runtime/engine, src/serve, apps/serve
+  * usage reporting for prefix-cache hits: OpenAI responses carry
+    usage.prompt_tokens_details.cached_tokens and Anthropic responses carry
+    usage.cache_read_input_tokens (and a zero cache_creation_input_tokens) --
+    src/serve/request.h, src/serve/http_server.cpp, src/serve/openai_schema.cpp,
+    src/serve/anthropic_schema.cpp
   * tools/convert/qwen3_8_27b/convert_w4a4.py and
     docs/maintainer/qwen3.8-27b-w4a4-artifact.md, which script and document the
     W4A4 NVFP4 source-to-artifact conversion this fork is validated on
