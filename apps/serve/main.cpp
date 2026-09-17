@@ -122,13 +122,13 @@ int main(int argc, char** argv) {
         // process keeps answering HTTP. Upstream expects the operator to notice and restart; with
         // systemd in front of this process we can hand it over instead: exit non-zero so
         // `Restart=on-failure` reloads the model (about 15 s) instead of leaving a dead model up.
+        // The watchdog starts once the engine is constructed and the port is about to listen: from
+        // that point a healthy engine always reports available, so "unavailable while serving" is
+        // exactly the engine-scope failure this covers (including a failure during warmup).
         std::atomic<bool> watchdog_stop{false};
         std::thread watchdog([&service, &watchdog_stop] {
-            bool ever_available = false;
             while (!watchdog_stop.load(std::memory_order_relaxed)) {
-                if (service.is_available()) {
-                    ever_available = true;
-                } else if (ever_available && !g_shutting_down.load()) {
+                if (!service.is_available() && !g_shutting_down.load()) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     if (watchdog_stop.load() || g_shutting_down.load() || service.is_available()) {
                         continue;

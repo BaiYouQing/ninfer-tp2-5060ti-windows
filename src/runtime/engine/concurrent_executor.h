@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <unistd.h>
 #include <deque>
 #include <exception>
 #include <memory>
@@ -1232,7 +1233,7 @@ private:
             try {
                 std::scoped_lock execution_lock(execution_mutex_);
                 // TEMP(fault-injection): 验证 /health 503 + 看门狗自愈；验证完立即 revert。
-                if (getenv("NINFER_FAULT_INJECT") != nullptr) {
+                if (::access("/tmp/ninfer_fault_inject", F_OK) == 0) {
                     throw std::runtime_error("fault injection: engine-scope failure");
                 }
                 const bool have_pending          = expire_pending_requests();
