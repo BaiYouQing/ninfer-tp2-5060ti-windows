@@ -59,9 +59,14 @@ void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char
 }
 
 std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_heads, const char* op) {
-    if (cache.k_dtype != cache.v_dtype || cache.k_quant_group != cache.v_quant_group) {
+    // 支持的组合：两侧完全同档（bf16 / int8），或 k16v8（K=bf16 无 scale + V=e4m3 每 256 维 1 scale）。
+    const bool same_side = cache.k_dtype == cache.v_dtype &&
+                           cache.k_quant_group == cache.v_quant_group;
+    const bool k16v8     = cache.k_dtype == DType::BF16 && cache.k_quant_group == 0 &&
+                       cache.v_dtype == DType::FP8_E4M3FN && cache.v_quant_group == kKVCacheFp8Group;
+    if (!same_side && !k16v8) {
         throw std::invalid_argument(std::string(op) +
-                                    ": per-side KV codec is not wired yet (K and V must match)");
+                                    ": unsupported per-side KV codec combination");
     }
     if ((cache.k_dtype != DType::BF16 && cache.k_dtype != DType::I8) ||
         cache.num_kv_heads != kv_heads || cache.head_dim != kHeadDim) {
@@ -120,9 +125,14 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
 
 std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
                                    const char* op) {
-    if (cache.k_dtype != cache.v_dtype || cache.k_quant_group != cache.v_quant_group) {
+    // 支持的组合：两侧完全同档（bf16 / int8），或 k16v8（K=bf16 无 scale + V=e4m3 每 256 维 1 scale）。
+    const bool same_side = cache.k_dtype == cache.v_dtype &&
+                           cache.k_quant_group == cache.v_quant_group;
+    const bool k16v8     = cache.k_dtype == DType::BF16 && cache.k_quant_group == 0 &&
+                       cache.v_dtype == DType::FP8_E4M3FN && cache.v_quant_group == kKVCacheFp8Group;
+    if (!same_side && !k16v8) {
         throw std::invalid_argument(std::string(op) +
-                                    ": per-side KV codec is not wired yet (K and V must match)");
+                                    ": unsupported per-side KV codec combination");
     }
     if ((cache.k_dtype != DType::BF16 && cache.k_dtype != DType::I8) ||
         cache.num_kv_heads != kv_heads || cache.head_dim != kHeadDim) {

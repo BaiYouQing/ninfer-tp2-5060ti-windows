@@ -84,6 +84,40 @@ __global__ void gqa_attention_prefill_fill_bf16_kernel(
     }
 }
 
+// Stage one [Bc, D] V tile 的 fp8 版本：cache 里是 8 bit e4m3 code（每 256 维 1 个 fp16 scale），
+// 读 8 个 code（8 B）→ 解量化成 8 个 bf16 → 写进与本文件 bf16 路径完全相同的 swizzle 位置。
+// 与 bf16 路径的差别：不用 cp.async（要过一遍转换），所以是同步读写（i8 路径同款做法）。
+template <typename Geometry>
+__device__ __forceinline__ void gqa_prefill_stage_v_fp8(__nv_bfloat16* dst,
+                                                        const std::uint8_t* cache_codes,
+                                                        const __half* v_scale_pages, int kv_head,
+                                                        int k0, int max_query_abs,
+                                                        int physical_page, int tid) {
+    constexpr int D         = kGqaPrefillHeadDim;
+    constexpr int Bc        = kGqaPrefillBc;
+    constexpr int Threads   = kGqaPrefillThreads;
+    constexpr int VecPerRow = D / 8; // 8 个 e4m3 code == 8 维
+    const bool full_tile    = (k0 + Bc - 1) <= max_query_abs;
+    const std::uint8_t* cache_block =
+        cache_codes + paged_kv_element_offset<kGqaPrefillHeadDim, Geometry::KVHeads>(
+                          physical_page, kv_head, k0 & kPagedKVPageMask, 0);
+    for (int chunk = tid; chunk < Bc * VecPerRow; chunk += Threads) {
+        const int key_l   = chunk >> 5;        // / VecPerRow (32)
+        const int d       = (chunk & 31) << 3; // (chunk % 32) * 8
+        __nv_bfloat16* p  = &dst[key_l * D + gqa_prefill_swz(key_l, d)];
+        const int key     = k0 + key_l;
+        if (full_tile || key <= max_query_abs) {
+            const uint2 code8  = load_vec<uint2>(&cache_block[key_l * D + d]);
+            const __half scale = v_scale_pages[kv_cache_fp8_scale_index<Geometry>(
+                physical_page, kv_head, key & kPagedKVPageMask)];
+            store_vec(p, kv_cache_fp8_dequant_code8_to_bf16x8(
+                             reinterpret_cast<const std::uint8_t*>(&code8), scale));
+        } else {
+            store_vec(p, make_int4(0, 0, 0, 0));
+        }
+    }
+}
+
 // Stage one [Bc, D] K or V tile from the per-kv-head contiguous cache into the
 // swizzled smem buffer. Keys beyond max_query_abs (which the causal mask always
 // drops) are zeroed so the padded/uninitialized cache tail never feeds NaNs into
@@ -127,11 +161,12 @@ __device__ __forceinline__ void gqa_prefill_stage_kv(__nv_bfloat16* dst, const _
 // FlashAttention-2 forward, one CTA per (query 64-row block, query head). Grid is
 // (ceil(tokens/64), q_heads). seqlen_q = tokens, seqlen_k = base_pos + tokens, with
 // bottom-right causal alignment (query row i sees keys [0, base_pos + i]).
-template <typename Geometry, typename Metadata>
+template <typename Geometry, typename Metadata, bool Fp8Value = false>
 __launch_bounds__(kGqaPrefillThreads, 1) __global__
     void gqa_attention_prefill_bf16_kernel(const __nv_bfloat16* __restrict__ q,
                                            const __nv_bfloat16* __restrict__ cache_k,
                                            const __nv_bfloat16* __restrict__ cache_v,
+                                           const __half* __restrict__ v_scale_pages,
                                            Metadata metadata,
                                            const std::int32_t* __restrict__ positions, float scale,
                                            __nv_bfloat16* __restrict__ out, std::int32_t width) {
@@ -261,8 +296,14 @@ __launch_bounds__(kGqaPrefillThreads, 1) __global__
         __syncthreads();
 
         // Overlap V(kb) load against the QK MMA below.
-        gqa_prefill_stage_kv<Geometry>(v_s, cache_v, kv_head, k0, max_query_abs, physical_page,
-                                       tid);
+        if constexpr (Fp8Value) {
+            gqa_prefill_stage_v_fp8<Geometry>(v_s, reinterpret_cast<const std::uint8_t*>(cache_v),
+                                              v_scale_pages, kv_head, k0, max_query_abs,
+                                              physical_page, tid);
+        } else {
+            gqa_prefill_stage_kv<Geometry>(v_s, cache_v, kv_head, k0, max_query_abs,
+                                           physical_page, tid);
+        }
         ninfer::ops::cp_commit();
 
         // S = Q Kᵀ for this warp's 16 rows over all Bc keys, in registers.
