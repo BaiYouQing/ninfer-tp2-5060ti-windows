@@ -145,7 +145,7 @@ measured recommendation rather than a semantic limit.
 | `--device N` | CUDA device index | `0` |
 | `--tp 1\|2` | tensor-parallel width; `2` splits the model across two GPUs | `1` |
 | `--devices A,B` | one CUDA device index per `--tp` rank; required for `--tp 2` | `--device` |
-| `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|k16v8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -208,9 +208,10 @@ device used at the default `--tp 1`; when both are given they must agree on the 
 Tensor-parallel execution is implemented for the 27B execution package (`qwen3.6-27b` and
 `qwen3.8-27b`, either weight profile). `qwen3.6-35b-a3b` has no tensor-parallel path and rejects
 `--tp 2` at startup, as do `--spec dflash` and `--vision`. `--spec mtp` is supported at `--tp 2`,
-with one behavioral difference: compatible-prefix reuse is downgraded to a full prefill, because
-the MTP head resumes from a retained target hidden state that only the primary device holds. The
-answer is unchanged; only the reuse saving is lost.
+**including compatible-prefix reuse**: the MTP head resumes from the retained target hidden state,
+so a request that extends a prefix the engine still holds is resumed. A resubmission whose reusable
+prefix already covers the whole prompt has no suffix to compute and is prefilled again; the answer
+is unchanged either way.
 
 The load summary reports weights, KV pool, GDN state, sequence, workspace, CUDA Graph and reserved
 bytes per device, plus a free/total row for each. `--no-cuda-graph` runs decode eagerly; at `--tp 2`

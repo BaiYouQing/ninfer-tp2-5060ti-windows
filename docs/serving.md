@@ -85,13 +85,13 @@ device without a speculative backend and 17.69 GiB with `--spec mtp --draft-toke
 at extended context requires a smaller `--max-context` (roughly 500,000 tokens for two slots at
 INT8 KV). `--kv-dtype int8` is mandatory at that window.
 
-One caveat applies to that combination: **prefix reuse is unavailable at `--tp 2` with
-`--spec mtp`**. Resuming a prefix drives the MTP head from a retained target hidden state that
-only the primary device holds, so such a request is prefilled again from the start instead of
-resumed. The answer is unchanged and no request fails -- only the reuse saving is lost, which
-matters for multi-turn conversations at long context. `--tp 2` without `--spec mtp` reuses
-prefixes normally except for a submission whose reusable prefix already covers the whole prompt,
-which is likewise downgraded to a full prefill.
+One caveat applies to that combination: a reused prefill is not bit-identical to a cold one.
+**Prefix reuse is available at `--tp 2` with `--spec mtp`**: the MTP bridge resumes from the
+retained target hidden state, so a request that extends a prefix the engine still holds is resumed
+instead of prefilled from the start. Two cases are still recomputed rather than resumed: a
+submission whose reusable prefix already covers the whole prompt (there is no suffix left to
+compute), and a request whose common prefix is not the one the engine retained. The answer is
+unchanged and no request fails in either case -- only the reuse saving is lost.
 
 ## Endpoints
 
@@ -530,7 +530,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
-| `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|k16v8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

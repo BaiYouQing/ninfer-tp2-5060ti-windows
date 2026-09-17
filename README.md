@@ -10,18 +10,50 @@ across two RTX 5090s and, with YaRN positional scaling, serves contexts up to 1,
 see [Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context).
 
 > **This is a fork.** Upstream is [Neroued/ninfer](https://github.com/Neroued/ninfer); this tree
-> branches from its commit `feaf4dd` and adds two things to the 27B execution package. **Dual-GPU
-> tensor parallelism** (`--tp 2 --devices A,B`) halves per-card weight and KV residency and is
-> ~40% faster at long context — one resident model, one process, two devices, no NVLink and no
-> distributed serving. **YaRN ×4 positional scaling** (`--rope yarn`) raises the addressable
-> ceiling from the registered 262,144 tokens to 1,048,576, computed to match vLLM as deployed and
-> guarded by a drift test against the installed vLLM. Everything else is upstream's:
-> `--tp 1` output is byte-identical to `feaf4dd` on the greedy cases in
-> [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md), and single-GPU behaviour,
-> supported identities, artifact format, and protocol surfaces are unchanged. The design
-> decisions, numerical contracts, and qualification evidence behind both features are in
+> branches from its commit `feaf4dd` via the TP2 line
+> ([wamansou/ninfer-tp2-1m](https://github.com/wamansou/ninfer-tp2-1m),
+> [giocom/ninfer-3060X2](https://github.com/giocom/ninfer-3060X2)) and, on that base, adds two
+> things to the 27B execution package. **Dual-GPU tensor parallelism** (`--tp 2 --devices A,B`)
+> halves per-card weight and KV residency and is ~40% faster at long context — one resident model,
+> one process, two devices, no NVLink and no distributed serving. **YaRN ×4 positional scaling**
+> (`--rope yarn`) raises the addressable ceiling from the registered 262,144 tokens to 1,048,576,
+> computed to match vLLM as deployed and guarded by a drift test against the installed vLLM. This
+> fork further adds **KV-cache tiers** (`--kv-dtype bf16|int8|fp8|k16v8`), a **working MTP prefix
+> reuse at `--tp 2`**, and a **truthful `/health`** with supervisor-driven self-heal; those three
+> were measured on **2× RTX 5060 Ti (16 GiB each)**. `--tp 1` output is byte-identical to `feaf4dd`
+> on the greedy cases in [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md), and
+> single-GPU behaviour, supported identities, artifact format, and protocol surfaces are unchanged.
+> The design decisions, numerical contracts, and qualification evidence behind both features are in
 > [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md).
 > See [NOTICE](NOTICE) for attribution.
+
+## Quick start
+
+Clone **this** repository (not upstream, and not the TP2 forks it descends from):
+
+```bash
+git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
+cd ninfer-tp2-5060ti
+
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+Serve the 27B NVFP4 W4A4 artifact on two GPUs with the K16V8 KV cache (253,952-token context,
+MTP3 speculative decoding with the optimized draft head):
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
+  --host 0.0.0.0 --port 8815 --model-id qwen3.8-27b-w4a4-mtp3 \
+  --tp 2 --devices 0,1 --kv-dtype k16v8 \
+  --max-context 253952 --kv-capacity 253952 --prefill-chunk 1024 \
+  --spec mtp --draft-tokens 3 --lm-head-draft --max-concurrency 1 --cors
+```
+
+That artifact is not distributed by this repository -- see [Download a model](#download-a-model).
+[Requirements](#requirements), [Build](#build) and
+[Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context) cover the prerequisites,
+artifact conversion and the complete option set.
 
 NInfer deliberately supports a closed set of model artifacts instead of acting as a general model
 runtime:
@@ -153,11 +185,12 @@ binary distribution; NInfer is run from its source build tree.
 
 ## Build
 
-Clone this fork, not upstream — upstream has neither `--tp 2` nor `--rope yarn`.
+Clone **this** repository — upstream has neither `--tp 2` nor `--rope yarn`, and neither do the
+other TP2 forks carry these KV tiers.
 
 ```bash
-git clone https://github.com/wamansou/ninfer-tp2-1m.git
-cd ninfer-tp2-1m
+git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
+cd ninfer-tp2-5060ti
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -259,6 +292,20 @@ request-transient allocation are omitted. Add `--vision` to the CLI or server pr
 accept image or video input. Disabled capabilities cannot be enabled by a later request. DFlash is
 available only for the 35B-A3B target and is text-only.
 
+### The W4A4 artifact this fork is validated on
+
+The TP2 measurements in this README, and the KV-tier, prefix-reuse and `/health` work added by this
+fork, were taken on a **Qwen3.8-27B NVFP4 W4A4** artifact that this repository does not distribute:
+
+| Artifact | Source | How to obtain it |
+|---|---|---|
+| `qwen3_8_27b_nvfp4w4a4.ninfer` (NVFP4 **W4A4**; 4-bit weights *and* 4-bit activations) | a merged Qwen3.8-27B fine-tune published on ModelScope as `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4` (the W4A4 variant), quantized with ModelOpt NVFP4, group size 16 | **Not distributed here.** Convert it yourself with `tools/convert/qwen3_8_27b/convert_w4a4.py`; the source layout, the exact command and the verification gate are in [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md) |
+
+The five upstream artifacts above remain supported. One caveat specific to this fork's TP2 path:
+the upstream `qwen3.8-27b/nvfp4` artifact is **not** validated on `--tp 2` -- its BF16 exception
+layers fail the column-parallel fused-weight bind -- so the W4A4 form above is the TP2 artifact to
+use.
+
 ## Run the CLI
 
 ```bash
@@ -324,8 +371,13 @@ at either `--tp` width -- but 1,048,576 tokens only fits when both are used toge
 TP2 is a capacity feature, not a scale-out feature: one process, one resident model, two CUDA
 devices, no NVLink and no distributed serving. It is implemented for the 27B execution package
 (`qwen3.6-27b` and `qwen3.8-27b`, either weight profile); `qwen3.6-35b-a3b` has no tensor-parallel
-path and rejects `--tp 2` at startup. Every measurement below was taken on the Qwen3.8-27B NVFP4
-artifact.
+path and rejects `--tp 2` at startup.
+
+The original TP2/YaRN campaign below was run on two RTX 5090s against the Qwen3.8-27B NVFP4
+artifact. The `### KV-cache tiers and long-context limits` subsection is the one part of this
+section re-measured by this fork, on **2× RTX 5060 Ti** (16 GiB each) against the W4A4 artifact
+described under [Download a model](#download-a-model); the two hardware profiles are kept separate
+and no figure is compared across them.
 
 ### Usage
 
@@ -368,6 +420,41 @@ entirely inside the reasoning stream:
   at `--tp 2` including at 1M. `--spec dflash` and `--vision` are rejected at `--tp 2`.
 
 See the [CLI guide](docs/cli.md) and [HTTP serving](docs/serving.md) for the full option contract.
+
+### KV-cache tiers and long-context limits
+
+`--kv-dtype` selects the KV codec per side: `bf16` (no quantization), `int8` (per-64 fp16 scale),
+`fp8` (e4m3, per-256 fp16 scale), `k16v8` (BF16 keys + FP8 values). All tiers compute QK in BF16;
+the codec only changes residency and read-back.
+
+Measured on 2× RTX 5060 Ti (TP2, one slot, 8k-token prompt, `--spec mtp --draft-tokens 3
+--lm-head-draft --prefill-chunk 1024`):
+
+| `--kv-dtype` | prefill | decode | MTP acceptance | 1-slot context ceiling |
+|---|---|---|---|---|
+| `int8` | 4880 tok/s | 106.5 tok/s | 3.04 tok/round | 262144 |
+| `fp8` | 4170 tok/s | 91.4 tok/s | 2.69 tok/round | 262144 |
+| `k16v8` | 4480 tok/s | 88.2 tok/s | 2.56 tok/round | 253952 (chunk 1024) / 229376 (chunk 4096) |
+| `bf16` | — | — | 2.89 tok/round | — |
+
+Per-round cost is the same across tiers (28.5–29.4 ms); the token-rate spread comes from the
+acceptance length the speculative pairing reaches. `--kv-capacity` must be ≥ `--max-context`, and
+the explicit-capacity form is what fits a tier at its ceiling (`auto` keeps a 512 MiB sizing
+headroom, which `k16v8` cannot afford at 253952).
+
+Long context (k16v8, 1 slot, 253952): a 57.7k-token prompt prefills in 30.4 s (1905 tok/s), a
+192.6k-token prompt in 287 s (672 tok/s) with a correct mid-context needle and constant 15.7 GiB
+per GPU — prefill is O(T²) and gets slow, decode is unaffected (82–96 tok/s).
+
+Prefix reuse hits when the retained turn checkpoint covers the prompt: a repeated request reports
+`cache=7872 reuse=restore_turn_checkpoint` and its time-to-first-token drops from 1788 ms to 71 ms.
+A reused prefill computes its suffix from the checkpoint frontier rather than from the full-prefill
+chunk grid, so a hit and a cold run can differ in the last bits (and occasionally in greedy text) —
+the same class of caveat as vLLM/SGLang prefix caching.
+
+`/health` reports engine availability (`200 {"status":"ok"}` / `503 {"status":"unavailable"}`), and
+`apps/ninfer-serve` exits non-zero when the engine becomes unusable so a supervisor
+(`Restart=on-failure`) reloads the model in about 16 s instead of leaving a dead endpoint up.
 
 ### Memory, per GPU
 
@@ -558,10 +645,13 @@ when the resource is not present.
   token costs 128 reduces plus one logit all-gather; a 10 KiB reduce measures about 16 us, and
   under CUDA Graphs the whole collective set costs roughly 0.2 ms per token (both at the 400 W
   per-GPU cap).
-- **MTP prefix reuse resets at `--tp 2`.** Resuming a prefix drives the MTP head from a retained
-  target hidden state that only the primary device holds, so `--tp 2 --spec mtp` downgrades every
-  reuse to a full prefill. The answer is unchanged and no request fails; the saving is lost, which
-  matters for multi-turn conversation at long context.
+- **MTP prefix reuse works at `--tp 2`, with two known degradations.** This fork implements the
+  retained-state resume on the TP2 path, so a request that extends a prefix the engine still holds
+  hits (`reuse=restore_turn_checkpoint`) instead of re-prefilling the whole prompt. It still
+  degrades to a full prefill when the retained base already covers the entire prompt, so that there
+  is no suffix left to compute; and a hit is a *same-prefix continuation*, not a shared prefix --
+  a request whose common prefix is not the one the engine retained does not hit. The answer is
+  unchanged in every case and no request fails.
 - **MTP is output-equivalent up to near-tie argmax flips, not bit-identical.** A verify round
   evaluates the target model over `K+1` columns at once and an ordinary round over one, which
   selects different GEMM shapes; greedy MTP-on and MTP-off streams can therefore diverge on a
@@ -602,25 +692,35 @@ when the resource is not present.
   extents only -- the NVFP4, Q4, Q5, W8 and vocabulary shard geometries are qualified pairwise
   against the `--tp 1` kernel on the whole weight, plus the model-level parity, retrieval and
   MTP-argmax evidence.
+- **A reused prefix can differ from a cold prefill in the last bits.** A cache hit computes its
+  suffix from the retained checkpoint frontier instead of from the full-prefill chunk grid, so the
+  two runs are not bit-identical and greedy text can occasionally flip. This is the same class of
+  caveat as vLLM/SGLang prefix caching, and it is why a cache hit is not a correctness contract.
+- **The FP8 tiers prefill about 9–14% slower than `int8`.** The FP8 KV staging path is not yet
+  asynchronous; decode is unaffected.
+- **`k16v8` cannot reach 262144 tokens in a single slot.** Its BF16 keys cost 26.2 KiB/token, so the
+  one-slot ceiling is 253952 with `--prefill-chunk 1024` (and 229376 with `--prefill-chunk 4096`).
 
 This section and [Performance](docs/performance.md) carry the headline figures with their
 reproduction commands. The design decisions behind them -- the collective transport, the shard map,
 the YaRN constants, and what each correctness gate actually proves -- are in
 [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md).
 
-## Capabilities
+## Capabilities and limits
 
-All three registered model IDs support:
+Capabilities. All three registered model IDs support:
 
 - text generation with thinking and non-thinking prompt modes;
 - image, multi-image, video, and mixed multimodal messages;
 - chunked prefill and CUDA Graph decode;
 - startup-bounded small-scale concurrent serving with true batched decode;
 - MTP speculative decoding with draft windows from one to five;
-- BF16 and INT8 group-64 KV cache;
+- KV cache tiers `bf16`, `int8` (group-64), `fp8` (e4m3) and `k16v8` (BF16 keys + FP8 values);
 - model- and thinking-mode-aware official sampling defaults, with explicit greedy, temperature,
   top-k, top-p, min-p, and presence/frequency-penalty overrides;
-- compatible-prefix reuse;
+- compatible-prefix reuse, including MTP at `--tp 2`;
+- a `/health` endpoint that reports engine availability and a server that exits non-zero when the
+  engine becomes unusable, so a supervisor can restart it;
 - OpenAI Responses Core, OpenAI Chat Completions, and Anthropic Messages, including streaming and
   usage accounting;
 - prompt-rendered function tools and parsed tool calls.
@@ -628,13 +728,14 @@ All three registered model IDs support:
 The 35B-A3B target additionally supports text-only DFlash speculative decoding with draft windows
 from one to fifteen.
 
-## Current limits
+Limits.
 
 - Only the five `(model_id, weights_id)` artifact identities listed above are accepted product
   identities.
 - Execution is specialized for the RTX 5090. One CUDA device is the default; the 27B execution
   package also runs on exactly two with `--tp 2 --devices A,B`, which is a capacity feature rather
-  than scale-out.
+  than scale-out. This fork adds measurements on 2× RTX 5060 Ti (16 GiB); the build target is
+  `sm_120a` either way.
 - One Engine owns one resident model and supports a startup-fixed capacity of 1–8 active requests.
   Decode-ready requests are compacted at round boundaries and executed in one batched model
   traversal.
@@ -651,6 +752,26 @@ from one to fifteen.
   startup and is not divided statically among request lanes.
 - Tool calls are parsed and returned to the client; NInfer does not execute tools.
 - The C++ headers are used by the in-tree applications and are not distributed as an installed SDK.
+
+### Relationship to upstream
+
+This fork descends from `Neroued/ninfer` at commit `feaf4dd` (2026-08-20) through the TP2 line, and
+carries its own work on that base. Upstream `master` has since advanced more than 200 commits and
+restructured its runtime -- its executor and KV sizing live in different files than here, and its
+KV-cache subsystem was rewritten. The two trees are therefore **not** interchangeable: merging
+`master` into this line conflicts in hundreds of files, so this fork tracks its own base and
+cherry-picks upstream fixes where they apply instead of following `master`. GitHub reports this
+branch as ahead of *and* behind `Neroued:master` -- that is the state of this line, not staleness.
+
+| | this fork | upstream `master` |
+|---|---|---|
+| `--kv-dtype` | `bf16`, `int8`, `fp8`, **`k16v8`** (BF16 keys + FP8 values) | `bf16`, `int8`, `fp8`, `nvfp4`, `k8v4` |
+| Tensor parallelism | `--tp 2 --devices A,B`, validated on 2× RTX 5090 and 2× RTX 5060 Ti | single GPU |
+| `/health` | engine availability, plus a supervisor-driven restart when the engine dies | engine availability |
+
+If you want `nvfp4` / `k8v4` KV tiers or upstream's newest single-GPU scheduling work, use upstream.
+If you want tensor-parallel serving on two consumer cards with the `k16v8` tier and MTP prefix reuse
+that actually hits, this fork is the line to use.
 
 ## Documentation
 
