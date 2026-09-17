@@ -18,6 +18,7 @@
 #include <math_constants.h>
 
 #include "ops/kernel/gqa_attention_prefill_common.cuh"
+#include "ops/kernel/kv_codec_fp8.cuh"
 
 namespace ninfer::ops {
 
