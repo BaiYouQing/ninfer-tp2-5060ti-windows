@@ -51,6 +51,9 @@ struct RequestLimits {
 struct CompletionUsage {
     int prompt_tokens     = 0;
     int completion_tokens = 0;
+    // 复用命中的 prompt token 数（OpenAI: prompt_tokens_details.cached_tokens /
+    // Anthropic: cache_read_input_tokens）。
+    int cached_tokens     = 0;
 };
 
 enum class ContentKind {

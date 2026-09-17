@@ -593,7 +593,9 @@ std::string make_messages_response(const std::string& id, const std::string& mod
                           {"stop_reason", stop_reason},
                           {"stop_sequence", nullptr},
                           {"usage", Json{{"input_tokens", usage.prompt_tokens},
-                                         {"output_tokens", usage.completion_tokens}}}};
+                                         {"output_tokens", usage.completion_tokens},
+                                         {"cache_read_input_tokens", usage.cached_tokens},
+                                         {"cache_creation_input_tokens", 0}}}};
     return payload.dump();
 }
 

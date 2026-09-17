@@ -588,7 +588,8 @@ std::string make_chat_completion_response(const std::string& id, const std::stri
              {"index", 0}, {"message", std::move(message)}, {"finish_reason", finish_reason}}})},
         {"usage", Json{{"prompt_tokens", usage.prompt_tokens},
                        {"completion_tokens", usage.completion_tokens},
-                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens}}}};
+                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens},
+                       {"prompt_tokens_details", Json{{"cached_tokens", usage.cached_tokens}}}}}};
     return payload.dump();
 }
 
@@ -611,7 +612,8 @@ std::string make_chat_completion_tool_response(const std::string& id, const std:
              {"index", 0}, {"message", std::move(message)}, {"finish_reason", "tool_calls"}}})},
         {"usage", Json{{"prompt_tokens", usage.prompt_tokens},
                        {"completion_tokens", usage.completion_tokens},
-                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens}}}};
+                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens},
+                       {"prompt_tokens_details", Json{{"cached_tokens", usage.cached_tokens}}}}}};
     return payload.dump();
 }
 
@@ -675,7 +677,9 @@ std::string make_chat_chunk_usage(const std::string& id, const std::string& mode
     payload["choices"] = Json::array();
     payload["usage"]   = Json{{"prompt_tokens", usage.prompt_tokens},
                               {"completion_tokens", usage.completion_tokens},
-                              {"total_tokens", usage.prompt_tokens + usage.completion_tokens}};
+                              {"total_tokens", usage.prompt_tokens + usage.completion_tokens},
+                              {"prompt_tokens_details",
+                               Json{{"cached_tokens", usage.cached_tokens}}}};
     return sse_event(payload);
 }
 
