@@ -90,6 +90,8 @@ public:
 
     [[nodiscard]] ninfer::MemorySummary memory_summary() const { return engine_->memory_summary(); }
 
+    [[nodiscard]] bool is_available() const { return engine_->is_available(); }
+
     [[nodiscard]] ninfer::RuntimeStats runtime_stats() const { return engine_->runtime_stats(); }
 
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {

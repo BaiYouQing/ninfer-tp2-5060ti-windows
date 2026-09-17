@@ -266,8 +266,14 @@ void HttpServer::register_routes() {
             }
         });
 
-    server_.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(nlohmann::json{{"status", "ok"}}.dump(), "application/json");
+    server_.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
+        // Main-repo semantics: report engine availability, not merely "the process is listening".
+        // A failed engine keeps answering HTTP but cannot serve, and a supervisor/gateway needs to
+        // see that distinction to restart it.
+        const bool available = service_ != nullptr && service_->is_available();
+        res.status           = available ? 200 : 503;
+        res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
+                        "application/json");
     });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);

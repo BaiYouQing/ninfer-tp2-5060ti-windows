@@ -193,6 +193,14 @@ public:
         return out;
     }
 
+    // Main-repo semantics (engine_core.h): the engine is unavailable while it is stopping or after a
+    // failure has taken the shared execution unit down. `/health` projects exactly this, so a
+    // supervisor can tell "the engine is dead" from "the port is not answering".
+    [[nodiscard]] bool is_available() const {
+        std::lock_guard lock(queue_mutex_);
+        return !stopping_ && !failed_;
+    }
+
     [[nodiscard]] RuntimeStats runtime_stats() const {
         std::lock_guard lock(stats_mutex_);
         return published_stats_;

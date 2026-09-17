@@ -8,17 +8,22 @@
 #include <chrono>
 #include <csignal>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 namespace {
 
 std::atomic<ninfer::serve::HttpServer*> g_server{nullptr};
+std::atomic<bool> g_shutting_down{false};
 
 void handle_signal(int) {
+    g_shutting_down.store(true);
     ninfer::serve::HttpServer* server = g_server.load();
     if (server != nullptr) { server->stop(); }
 }
@@ -112,7 +117,35 @@ int main(int argc, char** argv) {
                   << ", auth: " << (options.api_key.empty() ? "disabled" : "bearer") << ')';
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, listening.str());
 
+        // Self-heal (our layer, not upstream's): the engine takes its shared execution unit down on
+        // an engine-scope failure and stays unusable -- every later request is 503 -- while the
+        // process keeps answering HTTP. Upstream expects the operator to notice and restart; with
+        // systemd in front of this process we can hand it over instead: exit non-zero so
+        // `Restart=on-failure` reloads the model (about 15 s) instead of leaving a dead model up.
+        std::atomic<bool> watchdog_stop{false};
+        std::thread watchdog([&service, &watchdog_stop] {
+            bool ever_available = false;
+            while (!watchdog_stop.load(std::memory_order_relaxed)) {
+                if (service.is_available()) {
+                    ever_available = true;
+                } else if (ever_available && !g_shutting_down.load()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    if (watchdog_stop.load() || g_shutting_down.load() || service.is_available()) {
+                        continue;
+                    }
+                    ninfer::serve::write_console_log(
+                        ninfer::serve::ConsoleLogLevel::Error,
+                        "engine became unavailable; exiting so the supervisor can restart it");
+                    std::fflush(nullptr);
+                    std::_Exit(1);
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+        });
+
         const bool ok = server.listen();
+        watchdog_stop.store(true);
+        if (watchdog.joinable()) { watchdog.join(); }
         g_server.store(nullptr);
         if (!ok) {
             ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Error,
