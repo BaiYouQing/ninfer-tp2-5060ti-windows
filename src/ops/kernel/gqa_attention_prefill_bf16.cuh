@@ -21,11 +21,12 @@
 
 namespace ninfer::ops {
 
-template <typename Geometry, typename Metadata>
+template <typename Geometry, typename Metadata, bool Fp8Value = false>
 __global__ void gqa_attention_prefill_fill_bf16_kernel(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const std::int32_t* __restrict__ positions, Metadata metadata,
-    __nv_bfloat16* __restrict__ cache_k, __nv_bfloat16* __restrict__ cache_v, std::int32_t width) {
+    __nv_bfloat16* __restrict__ cache_k, __nv_bfloat16* __restrict__ cache_v,
+    __half* __restrict__ v_scale_pages, std::int32_t width) {
     constexpr int VecElems = 8; // 8 bf16 == 16 B, matching the cache row alignment.
     const int tokens       = metadata.valid_tokens(width);
     const std::int64_t idx = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -53,7 +54,34 @@ __global__ void gqa_attention_prefill_fill_bf16_kernel(
     const std::int64_t cache_off = paged_kv_element_offset<kGqaPrefillHeadDim, Geometry::KVHeads>(
         physical_page, kv_head, position & kPagedKVPageMask, d);
     store_vec(&cache_k[cache_off], k_value);
-    store_vec(&cache_v[cache_off], v_value);
+    if constexpr (Fp8Value) {
+        // V 侧 fp8：整个 256 维向量一个 fp16 scale。head_dim/8 == 32 个 8 元素 chunk 连续排布，
+        // 所以同一个 warp 的 32 个线程正好覆盖一个 (kv_head, token) 向量 ⇒ warp 归约 absmax。
+        const __nv_bfloat16* v_bf16 = reinterpret_cast<const __nv_bfloat16*>(&v_value);
+        float lane_absmax           = 0.0f;
+#pragma unroll
+        for (int i = 0; i < VecElems; ++i) {
+            lane_absmax = fmaxf(lane_absmax, fabsf(__bfloat162float(v_bf16[i])));
+        }
+        const KVCacheFp8QuantParams params =
+            kv_cache_fp8_quant_params(kv_cache_fp8_warp_absmax(lane_absmax));
+        auto* v_codes = reinterpret_cast<std::uint8_t*>(cache_v);
+#pragma unroll
+        for (int i = 0; i < VecElems / 2; ++i) {
+            const std::uint16_t code2 = kv_cache_fp8_quant_code2(
+                __bfloat162float(v_bf16[2 * i]), __bfloat162float(v_bf16[2 * i + 1]),
+                params.inverse_scale);
+            v_codes[cache_off + 2 * i]     = static_cast<std::uint8_t>(code2 & 0xFFu);
+            v_codes[cache_off + 2 * i + 1] = static_cast<std::uint8_t>(code2 >> 8);
+        }
+        if (lane == 0) {
+            v_scale_pages[kv_cache_fp8_scale_index<Geometry>(physical_page, kv_head,
+                                                             position & kPagedKVPageMask)] =
+                params.scale;
+        }
+    } else {
+        store_vec(&cache_v[cache_off], v_value);
+    }
 }
 
 // Stage one [Bc, D] K or V tile from the per-kv-head contiguous cache into the

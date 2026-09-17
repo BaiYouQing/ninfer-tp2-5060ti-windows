@@ -112,7 +112,8 @@ void gqa_kv_append_launch_for(const Tensor& k, const Tensor& v, const Tensor& po
                                                static_cast<const __nv_bfloat16*>(v.data),
                                                static_cast<const std::int32_t*>(positions.data),
                                                metadata, static_cast<__nv_bfloat16*>(cache_k.data),
-                                               static_cast<__nv_bfloat16*>(cache_v.data), tokens);
+                                               static_cast<__nv_bfloat16*>(cache_v.data),
+                                               nullptr, tokens);
         CUDA_CHECK(cudaGetLastError());
     }
 }
