@@ -284,6 +284,30 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
         plan->rewrite_checkpoint_action = RewriteCheckpointAction::DeferCapture;
     }
 
+    // A resumed prefill has to reproduce the chunk decomposition a full prefill would use, or the
+    // two paths land on different floating-point accumulations -- and greedy decoding turns a last
+    // bit into different text. The boundary that matters is the prefill chunk grid: a full prefill
+    // lays chunks down from 0, so the chunk it computes last starts at a multiple of the chunk
+    // width. Resuming mid-chunk computes the same tokens from a different start, which is a
+    // different decomposition (measured: the same request resumed at a non-grid frontier and
+    // re-prefilled diverge on the first generated token). Retreating to the grid costs at most
+    // `prefill_chunk - 1` recomputed tokens -- negligible against the prefix retained -- and makes
+    // the resumed suffix the very chunk a full prefill would have computed. A retreat to zero means
+    // nothing is left to reuse.
+    //
+    // This runs AFTER the rewrite-checkpoint decisions above on purpose: those compare the desired
+    // frontier against the reuse base, so aligning first would turn a usable retained checkpoint
+    // into a "not yet captured" one and the prefill would then fail to find it.
+    if (plan->reuse != ReusePath::FullReset && plan->reuse_base != 0 && prefill_chunk > 0) {
+        const std::uint32_t aligned = plan->reuse_base - plan->reuse_base % prefill_chunk;
+        if (aligned == 0) {
+            plan->reuse      = ReusePath::FullReset;
+            plan->reuse_base = 0;
+        } else {
+            plan->reuse_base = aligned;
+        }
+    }
+
     plan->summary.reusable_prompt_tokens = plan->reuse_base;
     if (speculative_backend == SpeculativeBackend::Mtp) {
         if (plan->reuse == ReusePath::FullReset) {
