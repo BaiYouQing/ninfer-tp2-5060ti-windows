@@ -91,4 +91,16 @@ __device__ __forceinline__ __half2 kv_cache_fp8_dequant_code2_to_half2(std::uint
     return __hmul2(kv_cache_fp8_code2_to_half2(storage), __halves2half2(scale, scale));
 }
 
+// 写侧：一个 warp 覆盖一个 token 的完整 256 维向量时（256/8 = 32 个 8 元素 chunk ↔ 32 lane），
+// lane 先在自己那 8 个元素上求 absmax，再 warp 归约得到整向量 absmax。
+// 供 kernel 的融合 append 用：归约完 broadcast 出 scale，各 lane 量化自己的 8 个元素。
+__device__ __forceinline__ float kv_cache_fp8_warp_absmax(float lane_absmax) {
+    float m = lane_absmax;
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, offset));
+    }
+    return m;
+}
+
 } // namespace ninfer::ops
