@@ -200,6 +200,18 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                         k_scale_pages[kv_cache_fp8_scale_index<Geometry>(
                             physical_page, kv_head, p_tok & kPagedKVPageMask)] = k_params.scale;
                     }
+                    if (kv_head == 0 && d == 0 && p_tok < 4) {
+                        printf("[WR-fused] kplane=%lld splane=%lld pos=%d off=%lld scale=%f "
+                               "c0=%02x c7=%02x\n",
+                               static_cast<long long>(
+                                   reinterpret_cast<std::uintptr_t>(k_codes)),
+                               static_cast<long long>(
+                                   reinterpret_cast<std::uintptr_t>(k_scale_pages)),
+                               p_tok, static_cast<long long>(cache_off),
+                               static_cast<double>(__half2float(k_params.scale)),
+                               static_cast<unsigned>(k_codes[cache_off]),
+                               static_cast<unsigned>(k_codes[cache_off + 7]));
+                    }
                 } else {
                     store_vec(&cache_k[cache_off], load_vec<int4>(&input.k[new_off]));
                 }
@@ -316,6 +328,18 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                             physical_page, kv_head, key & kPagedKVPageMask)];
                         const auto* k_codes = reinterpret_cast<const std::uint8_t*>(cache_k);
                         const uint2 k_code8 = load_vec<uint2>(&k_codes[cache_off]);
+                        if (kv_head == 0 && d == 0 && key < 4) {
+                            printf("[RD] kplane=%lld splane=%lld key=%d off=%lld scale=%f c0=%02x "
+                                   "c7=%02x\n",
+                                   static_cast<long long>(
+                                       reinterpret_cast<std::uintptr_t>(k_codes)),
+                                   static_cast<long long>(
+                                       reinterpret_cast<std::uintptr_t>(k_scale_pages)),
+                                   key, static_cast<long long>(cache_off),
+                                   static_cast<double>(__half2float(k_scale)),
+                                   static_cast<unsigned>(k_code8.x & 0xFFu),
+                                   static_cast<unsigned>((k_code8.y >> 24) & 0xFFu));
+                        }
                         store_vec(k_dst, kv_cache_fp8_dequant_code8_to_bf16x8(
                                              reinterpret_cast<const std::uint8_t*>(&k_code8), k_scale));
                     }

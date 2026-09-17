@@ -78,6 +78,15 @@ __global__ void gqa_attention_prefill_fill_bf16_kernel(
                                                              position & kPagedKVPageMask)] =
                 params.scale;
         }
+        if (kv_head == 0 && d == 0 && position < 4) {
+            printf("[WR-fill] kplane=%lld splane=%lld pos=%d off=%lld scale=%f c0=%02x c7=%02x\n",
+                   static_cast<long long>(reinterpret_cast<std::uintptr_t>(k_codes)),
+                   static_cast<long long>(reinterpret_cast<std::uintptr_t>(k_scale_pages)), position,
+                   static_cast<long long>(cache_off),
+                   static_cast<double>(__half2float(params.scale)),
+                   static_cast<unsigned>(k_codes[cache_off]),
+                   static_cast<unsigned>(k_codes[cache_off + 7]));
+        }
     } else {
         store_vec(&cache_k[cache_off], k_value);
     }
