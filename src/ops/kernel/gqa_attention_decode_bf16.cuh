@@ -301,14 +301,24 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_partial_bf16_
                     physical_page, kv_head, d, key & kPagedKVPageMask);
                 // K 与 V 的档位按侧独立判断：k16v8 只有 V 是 fp8，kvfp8 两侧都是。
                 if constexpr (Fp8Key) {
-                    // fp8 的 K 一律从量化 cache 回读：新 token 在写侧已量化落盘，
-                    // 不存在 from_new 的 bf16 例外（与 i8 内核一致）。
-                    const __half k_scale = k_scale_pages[kv_cache_fp8_scale_index<Geometry>(
-                        physical_page, kv_head, key & kPagedKVPageMask)];
-                    const auto* k_codes = reinterpret_cast<const std::uint8_t*>(cache_k);
-                    const uint2 k_code8 = load_vec<uint2>(&k_codes[cache_off]);
-                    store_vec(k_dst, kv_cache_fp8_dequant_code8_to_bf16x8(
-                                         reinterpret_cast<const std::uint8_t*>(&k_code8), k_scale));
+                    // fp8 的 K：历史 token 从量化 cache 反量化读；本步新 token 直接取输入（沿用
+                    // bf16 路径的 from_new 例外 —— 写侧那份量化副本留给后续轮次当"历史"读）。
+                    const int new_token = key - first_pos;
+                    bool from_new       = false;
+                    if constexpr (CacheInput::writes_cache) {
+                        from_new = new_token >= 0 && new_token < valid_tokens && key >= first_pos;
+                    }
+                    if (from_new) {
+                        const std::int64_t off = gqa_kv_new_index<Geometry>(kv_head, d, new_token);
+                        ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
+                    } else {
+                        const __half k_scale = k_scale_pages[kv_cache_fp8_scale_index<Geometry>(
+                            physical_page, kv_head, key & kPagedKVPageMask)];
+                        const auto* k_codes = reinterpret_cast<const std::uint8_t*>(cache_k);
+                        const uint2 k_code8 = load_vec<uint2>(&k_codes[cache_off]);
+                        store_vec(k_dst, kv_cache_fp8_dequant_code8_to_bf16x8(
+                                             reinterpret_cast<const std::uint8_t*>(&k_code8), k_scale));
+                    }
                 } else if constexpr (CacheInput::writes_cache) {
                     const int new_token = key - first_pos;
                     const bool from_new =
