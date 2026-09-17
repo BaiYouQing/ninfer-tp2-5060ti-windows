@@ -66,8 +66,13 @@ struct SequencePlanningInputs {
     std::uint32_t prefill_chunk            = 0;
     std::uint32_t draft_window             = 0;
     SpeculativeBackend speculative_backend = SpeculativeBackend::None;
-    DType kv_dtype                         = DType::BF16;
-    std::int32_t kv_quant_group            = 0;
+    // K/V 两侧的 codec 各自独立（k16v8 = K bf16 无 scale + V e4m3 每 256 维 1 个 scale；
+    // int8 是每 64 组）。quant_group == 0 表示该侧无 scale。路由选核以 K 侧为主，
+    // V 侧决定的是 V 的暂存/反量化路径。
+    DType kv_k_dtype                       = DType::BF16;
+    DType kv_v_dtype                       = DType::BF16;
+    std::int32_t kv_k_quant_group          = 0;
+    std::int32_t kv_v_quant_group          = 0;
     ProposalHead proposal_head             = ProposalHead::Full;
     StartupFeatures features;
     // Rotary regime. Nothing in the persistent or workspace layout depends on these:
@@ -102,6 +107,15 @@ struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     std::uint32_t prefill_chunk            = 0;
     std::uint32_t draft_window             = 0;
     SpeculativeBackend speculative_backend = SpeculativeBackend::None;
+    // K/V 两侧的 codec 各自独立（k16v8 = K bf16 无 scale + V e4m3 每 256 维 1 个 scale；
+    // int8 是每 64 组）。quant_group == 0 表示该侧无 scale。路由选核以 K 侧为主，
+    // V 侧决定的是 V 的暂存/反量化路径。
+    DType kv_k_dtype                       = DType::BF16;
+    DType kv_v_dtype                       = DType::BF16;
+    std::int32_t kv_k_quant_group          = 0;
+    std::int32_t kv_v_quant_group          = 0;
+    // 派生视图：attention workspace 的档位参数与对外报告目前只支持 K/V 同档；
+    // per-side 档位（k16v8 等）在内核读写入点接通前，由 planner 填充这里时显式拒绝。
     DType kv_dtype                         = DType::BF16;
     std::int32_t kv_quant_group            = 0;
     ProposalHead proposal_head             = ProposalHead::Full;

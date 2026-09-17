@@ -59,14 +59,18 @@ void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char
 }
 
 std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_heads, const char* op) {
-    if ((cache.dtype != DType::BF16 && cache.dtype != DType::I8) ||
+    if (cache.k_dtype != cache.v_dtype || cache.k_quant_group != cache.v_quant_group) {
+        throw std::invalid_argument(std::string(op) +
+                                    ": per-side KV codec is not wired yet (K and V must match)");
+    }
+    if ((cache.k_dtype != DType::BF16 && cache.k_dtype != DType::I8) ||
         cache.num_kv_heads != kv_heads || cache.head_dim != kHeadDim) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache geometry or dtype");
     }
-    if (cache.dtype == DType::BF16 && cache.quant_group != 0) {
+    if (cache.k_dtype == DType::BF16 && cache.k_quant_group != 0) {
         throw std::invalid_argument(std::string(op) + ": BF16 KV cache must not have quant_group");
     }
-    if (cache.dtype == DType::I8 && cache.quant_group != kQuantGroup) {
+    if (cache.k_dtype == DType::I8 && cache.k_quant_group != kQuantGroup) {
         throw std::invalid_argument(std::string(op) + ": I8 KV cache must use quant_group 64");
     }
 
@@ -78,7 +82,7 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
         throw std::invalid_argument(std::string(op) + ": invalid KV cache capacity");
     }
 
-    const DType code_dtype = cache.dtype == DType::I8 ? DType::I8 : DType::BF16;
+    const DType code_dtype = cache.k_dtype == DType::I8 ? DType::I8 : DType::BF16;
     if (cache.k_pages.dtype != code_dtype || cache.v_pages.dtype != code_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache code dtype");
     }
@@ -94,7 +98,7 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
     require_shape(cache.block_table, logical_pages, 1, 1, 1, op, "block table");
     require_contiguous_nonnull(cache.block_table, op, "block table");
 
-    if (cache.dtype == DType::BF16) {
+    if (cache.k_dtype == DType::BF16) {
         if (cache.k_scale_pages.data != nullptr || cache.v_scale_pages.data != nullptr) {
             throw std::invalid_argument(std::string(op) + ": BF16 KV cache must not have scales");
         }
@@ -116,14 +120,18 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
 
 std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
                                    const char* op) {
-    if ((cache.dtype != DType::BF16 && cache.dtype != DType::I8) ||
+    if (cache.k_dtype != cache.v_dtype || cache.k_quant_group != cache.v_quant_group) {
+        throw std::invalid_argument(std::string(op) +
+                                    ": per-side KV codec is not wired yet (K and V must match)");
+    }
+    if ((cache.k_dtype != DType::BF16 && cache.k_dtype != DType::I8) ||
         cache.num_kv_heads != kv_heads || cache.head_dim != kHeadDim) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache geometry or dtype");
     }
-    if (cache.dtype == DType::BF16 && cache.quant_group != 0) {
+    if (cache.k_dtype == DType::BF16 && cache.k_quant_group != 0) {
         throw std::invalid_argument(std::string(op) + ": BF16 KV cache must not have quant_group");
     }
-    if (cache.dtype == DType::I8 && cache.quant_group != kQuantGroup) {
+    if (cache.k_dtype == DType::I8 && cache.k_quant_group != kQuantGroup) {
         throw std::invalid_argument(std::string(op) + ": I8 KV cache must use quant_group 64");
     }
 
@@ -136,7 +144,7 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
         throw std::invalid_argument(std::string(op) + ": invalid KV cache capacity");
     }
 
-    const DType code_dtype = cache.dtype == DType::I8 ? DType::I8 : DType::BF16;
+    const DType code_dtype = cache.k_dtype == DType::I8 ? DType::I8 : DType::BF16;
     if (cache.k_pages.dtype != code_dtype || cache.v_pages.dtype != code_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache code dtype");
     }
@@ -152,7 +160,7 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
     require_shape(cache.block_tables, logical_pages, table_rows, 1, 1, op, "block tables");
     require_contiguous_nonnull(cache.block_tables, op, "block tables");
 
-    if (cache.dtype == DType::BF16) {
+    if (cache.k_dtype == DType::BF16) {
         if (cache.k_scale_pages.data != nullptr || cache.v_scale_pages.data != nullptr) {
             throw std::invalid_argument(std::string(op) + ": BF16 KV cache must not have scales");
         }
@@ -303,7 +311,7 @@ void launch_chunked_small_t(const Tensor& q, const Tensor& k, const Tensor& v,
         const std::int32_t count = std::min(kSmallTChunkTokens, q.ne[2] - begin);
         auto chunk_scope         = workspace.scope();
         const std::int32_t splits =
-            detail::gqa_attention_split_capacity(q.ne[1], count, cache.dtype, envelope);
+            detail::gqa_attention_split_capacity(q.ne[1], count, cache.k_dtype, envelope);
         SmallTWorkspace partial =
             allocate_small_t_workspace(workspace, q.ne[1], count, splits, q.ne[3]);
         detail::gqa_attention_small_t_launch(q, k, v, positions, valid_columns, table_rows, scale,
@@ -316,7 +324,7 @@ void launch_cached_chunked_small_t(const Tensor& q, const Tensor& positions, flo
                                    const PagedKVLayerView& cache, GqaExecutionEnvelope envelope,
                                    WorkspaceArena& workspace, Tensor& out, cudaStream_t stream) {
     for_each_small_t_chunk(
-        q, positions, workspace, cache.dtype, envelope, out,
+        q, positions, workspace, cache.k_dtype, envelope, out,
         [&](std::int32_t, std::int32_t, const Tensor& q_chunk, const Tensor& position_chunk,
             SmallTWorkspace& partial, Tensor& out_chunk) {
             detail::gqa_attention_cached_small_t_launch(q_chunk, position_chunk, scale, cache,
@@ -429,7 +437,7 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
     }
     if (route == detail::GqaAttentionRoute::SmallT) {
         const std::int32_t splits =
-            detail::gqa_attention_split_capacity(q.ne[1], width, cache.dtype, envelope);
+            detail::gqa_attention_split_capacity(q.ne[1], width, cache.k_dtype, envelope);
         SmallTWorkspace partial =
             allocate_small_t_workspace(workspace, q.ne[1], width, splits, batch);
         detail::gqa_attention_small_t_launch(q, k, v, positions, valid_columns, kv_table_rows,
@@ -481,7 +489,7 @@ void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
     }
     if (detail::gqa_attention_uses_small_t(q.ne[2])) {
         const std::int32_t splits =
-            detail::gqa_attention_split_capacity(q.ne[1], q.ne[2], cache.dtype, envelope);
+            detail::gqa_attention_split_capacity(q.ne[1], q.ne[2], cache.k_dtype, envelope);
         SmallTWorkspace partial = allocate_small_t_workspace(workspace, q.ne[1], q.ne[2], splits);
         detail::gqa_attention_cached_small_t_launch(q, positions, scale, cache, envelope,
                                                     partial.acc, partial.m, partial.l, out, stream);

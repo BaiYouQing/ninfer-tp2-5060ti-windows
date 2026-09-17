@@ -11,6 +11,8 @@
 namespace ninfer::targets::qwen3_6 {
 
 inline constexpr std::int32_t kKvQuantGroup = 64;
+// fp8 (E4M3FN) KV 的 scale 密度：每个 256 维向量 1 个 fp16 scale（对齐上游 row256 codec）。
+inline constexpr std::int32_t kKvFp8ScaleGroup = 256;
 
 struct DecoderStateSpec {
     std::uint32_t full_attention_layers     = 0;
@@ -18,8 +20,10 @@ struct DecoderStateSpec {
     std::uint32_t capacity                  = 0;
     std::int32_t kv_heads                   = 0;
     std::int32_t attention_head_dim         = 0;
-    DType kv_dtype                          = DType::BF16;
-    std::int32_t kv_quant_group             = 0;
+    DType kv_k_dtype                        = DType::BF16;
+    DType kv_v_dtype                        = DType::BF16;
+    std::int32_t kv_k_quant_group           = 0;
+    std::int32_t kv_v_quant_group           = 0;
     bool enable_mtp                         = false;
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
@@ -33,8 +37,10 @@ struct PagedKVCacheLayout {
     std::uint32_t max_context = 0;
     std::int32_t kv_heads     = 0;
     std::int32_t head_dim     = 0;
-    DType dtype               = DType::BF16;
-    std::int32_t quant_group  = 0;
+    DType k_dtype             = DType::BF16;
+    DType v_dtype             = DType::BF16;
+    std::int32_t k_quant_group = 0;
+    std::int32_t v_quant_group = 0;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return pool.payload_bytes(); }
 };
@@ -88,8 +94,10 @@ private:
     std::uint32_t max_context_ = 0;
     std::int32_t kv_heads_     = 0;
     std::int32_t head_dim_     = 0;
-    DType dtype_               = DType::BF16;
-    std::int32_t quant_group_  = 0;
+    DType k_dtype_             = DType::BF16;
+    DType v_dtype_             = DType::BF16;
+    std::int32_t k_quant_group_ = 0;
+    std::int32_t v_quant_group_ = 0;
 };
 
 struct DecoderStateLayout {

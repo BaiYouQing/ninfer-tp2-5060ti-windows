@@ -123,8 +123,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                      .capacity                  = plan.capacity,
                      .kv_heads                  = TextConfig::kv_heads / tp,
                      .attention_head_dim        = TextConfig::head_dim,
-                     .kv_dtype                  = plan.kv_dtype,
-                     .kv_quant_group            = plan.kv_quant_group,
+                     .kv_k_dtype                = plan.kv_k_dtype,
+                     .kv_v_dtype                = plan.kv_v_dtype,
+                     .kv_k_quant_group          = plan.kv_k_quant_group,
+                     .kv_v_quant_group          = plan.kv_v_quant_group,
                      .enable_mtp                = plan.features.mtp(),
                      .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
                      .text_physical_page_groups = physical_pages,
@@ -725,8 +727,20 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->use_cuda_graph      = inputs.use_cuda_graph;
     impl->device              = inputs.device;
     impl->tp                  = inputs.tp;
-    impl->kv_dtype            = inputs.kv_dtype;
-    impl->kv_quant_group      = inputs.kv_quant_group;
+    impl->kv_k_dtype          = inputs.kv_k_dtype;
+    impl->kv_v_dtype          = inputs.kv_v_dtype;
+    impl->kv_k_quant_group    = inputs.kv_k_quant_group;
+    impl->kv_v_quant_group    = inputs.kv_v_quant_group;
+    // attention workspace 的档位参数（gqa_attention_workspace_capacity_bytes）与对外报告目前
+    // 只支持 K/V 同档：per-side 档位若在这里放过，workspace 会按 K 侧尺寸去算而 V 侧不同 ⇒
+    // 静默越界。内核读写入点接通前一律拒绝。
+    if (inputs.kv_k_dtype != inputs.kv_v_dtype ||
+        inputs.kv_k_quant_group != inputs.kv_v_quant_group) {
+        throw std::invalid_argument(
+            "per-side KV codec 尚未接通：attention workspace 目前只支持 K/V 同档");
+    }
+    impl->kv_dtype            = inputs.kv_k_dtype;
+    impl->kv_quant_group      = inputs.kv_k_quant_group;
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->features.vision) {
@@ -808,30 +822,49 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     return impl;
 }
 
-// KV 档位 → K/V 两侧共用的 (dtype, quant_group)。
-// Fp8E4M3Row256 / Bf16KeyFp8Value 是 per-side 档（K、V 的 codec 与 scale 密度都不同），
-// 需要先让 decoder_state 的 plan_cache 接受 per-side 描述；在那之前这里显式拒绝，
-// 绝不允许把新档位静默当成 int8 跑（那会给出"看起来正常但语义错误"的结果）。
-DType kv_cache_side_dtype(KvCacheStorage storage) {
+// KV 档位 → K/V 两侧各自的 (dtype, quant_group)。
+//   bf16  : K/V 都 bf16、无 scale
+//   int8  : K/V 都 I8 + 每 64 组 1 个 fp16 scale
+//   fp8   : K/V 都 FP8_E4M3FN + 每 256 维 1 个 fp16 scale
+//   k16v8 : K bf16 无 scale、V FP8_E4M3FN（每 256 维 1 个 scale）
+// 注意：这里只负责"建池/建视图"；**是否真的能用**由内核路由决定（gqa_attention.cpp 会在
+// V 侧 codec 尚未接通时显式拒绝，避免拿 bf16 内核去读 fp8 的 V 而静默出错）。
+DType kv_cache_k_dtype(KvCacheStorage storage) {
     switch (storage) {
     case KvCacheStorage::BFloat16: return DType::BF16;
     case KvCacheStorage::Int8Group64: return DType::I8;
-    case KvCacheStorage::Fp8E4M3Row256:
-    case KvCacheStorage::Bf16KeyFp8Value:
-        throw std::invalid_argument(
-            "kv-dtype fp8|k16v8 尚未接通：需要 per-side KV 描述（K/V 各自 codec 与 scale 密度）");
+    case KvCacheStorage::Fp8E4M3Row256: return DType::FP8_E4M3FN;
+    case KvCacheStorage::Bf16KeyFp8Value: return DType::BF16;
     }
     throw std::invalid_argument("unknown kv cache storage");
 }
 
-std::int32_t kv_cache_side_quant_group(KvCacheStorage storage) {
+DType kv_cache_v_dtype(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16: return DType::BF16;
+    case KvCacheStorage::Int8Group64: return DType::I8;
+    case KvCacheStorage::Fp8E4M3Row256: return DType::FP8_E4M3FN;
+    case KvCacheStorage::Bf16KeyFp8Value: return DType::FP8_E4M3FN;
+    }
+    throw std::invalid_argument("unknown kv cache storage");
+}
+
+std::int32_t kv_cache_k_quant_group(KvCacheStorage storage) {
     switch (storage) {
     case KvCacheStorage::BFloat16: return 0;
     case KvCacheStorage::Int8Group64: return qwen3_6::kKvQuantGroup;
-    case KvCacheStorage::Fp8E4M3Row256:
-    case KvCacheStorage::Bf16KeyFp8Value:
-        throw std::invalid_argument(
-            "kv-dtype fp8|k16v8 尚未接通：需要 per-side KV 描述（K/V 各自 codec 与 scale 密度）");
+    case KvCacheStorage::Fp8E4M3Row256: return qwen3_6::kKvFp8ScaleGroup;
+    case KvCacheStorage::Bf16KeyFp8Value: return 0;
+    }
+    throw std::invalid_argument("unknown kv cache storage");
+}
+
+std::int32_t kv_cache_v_quant_group(KvCacheStorage storage) {
+    switch (storage) {
+    case KvCacheStorage::BFloat16: return 0;
+    case KvCacheStorage::Int8Group64: return qwen3_6::kKvQuantGroup;
+    case KvCacheStorage::Fp8E4M3Row256: return qwen3_6::kKvFp8ScaleGroup;
+    case KvCacheStorage::Bf16KeyFp8Value: return qwen3_6::kKvFp8ScaleGroup;
     }
     throw std::invalid_argument("unknown kv cache storage");
 }
@@ -850,8 +883,10 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
-        .kv_dtype       = kv_cache_side_dtype(options.kv_cache),
-        .kv_quant_group = kv_cache_side_quant_group(options.kv_cache),
+        .kv_k_dtype       = kv_cache_k_dtype(options.kv_cache),
+        .kv_v_dtype       = kv_cache_v_dtype(options.kv_cache),
+        .kv_k_quant_group = kv_cache_k_quant_group(options.kv_cache),
+        .kv_v_quant_group = kv_cache_v_quant_group(options.kv_cache),
         .proposal_head  = options.speculative.proposal_head,
         .features       = qwen3_6::startup_features(options),
         .rope_mode      = options.rope_mode,
