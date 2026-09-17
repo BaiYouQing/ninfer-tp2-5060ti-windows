@@ -89,8 +89,11 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
         throw std::invalid_argument(std::string(op) + ": invalid KV cache capacity");
     }
 
-    const DType code_dtype = cache.k_dtype == DType::I8 ? DType::I8 : DType::BF16;
-    if (cache.k_pages.dtype != code_dtype || cache.v_pages.dtype != code_dtype) {
+    // 两侧各自校验：plane 的 dtype 必须等于该侧 codec 的 dtype（I8 / BF16 / FP8_E4M3FN）。
+    // k16v8 = K bf16 + V e4m3，所以不能再用"两侧同 dtype"的假设。
+    const DType k_code_dtype = cache.k_dtype == DType::I8 ? DType::I8 : cache.k_dtype;
+    const DType v_code_dtype = cache.v_dtype == DType::I8 ? DType::I8 : cache.v_dtype;
+    if (cache.k_pages.dtype != k_code_dtype || cache.v_pages.dtype != v_code_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache code dtype");
     }
     require_shape(cache.k_pages, kHeadDim, kPagedKVPageSize, kv_heads, physical_pages, op,
@@ -158,8 +161,11 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
         throw std::invalid_argument(std::string(op) + ": invalid KV cache capacity");
     }
 
-    const DType code_dtype = cache.k_dtype == DType::I8 ? DType::I8 : DType::BF16;
-    if (cache.k_pages.dtype != code_dtype || cache.v_pages.dtype != code_dtype) {
+    // 两侧各自校验：plane 的 dtype 必须等于该侧 codec 的 dtype（I8 / BF16 / FP8_E4M3FN）。
+    // k16v8 = K bf16 + V e4m3，所以不能再用"两侧同 dtype"的假设。
+    const DType k_code_dtype = cache.k_dtype == DType::I8 ? DType::I8 : cache.k_dtype;
+    const DType v_code_dtype = cache.v_dtype == DType::I8 ? DType::I8 : cache.v_dtype;
+    if (cache.k_pages.dtype != k_code_dtype || cache.v_pages.dtype != v_code_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache code dtype");
     }
     require_shape(cache.k_pages, kHeadDim, kPagedKVPageSize, kv_heads, physical_pages, op,
