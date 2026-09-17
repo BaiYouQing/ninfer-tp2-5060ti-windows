@@ -95,9 +95,9 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
     // bf16 kernel uses only static smem (no dynamic staging).
-    // Fp8Value=true：K 仍是 bf16，V 是 e4m3 code + 每 256 维 1 个 fp16 scale（k16v8）。
+    // Fp8Value=true：V 是 e4m3 code + 每 256 维 1 个 fp16 scale（k16v8）；Fp8Key=true：K 同款（kvfp8）。
     gqa_attention_small_t_tc_partial_bf16_kernel<Geometry, TokenTile, WarpsPerCta, MultiBatch,
-                                                 Masked, CacheInput, Fp8Value>
+                                                 Masked, CacheInput, Fp8Value, Fp8Key>
         <<<grid, kBlock, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q.data), input,
             static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
