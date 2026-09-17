@@ -14,6 +14,11 @@
 namespace ninfer::ops {
 namespace {
 
+// fp8 (e4m3) KV 的 scale 密度：每 256 维 1 个 fp16 scale。必须与
+// ops/kernel/kv_codec_fp8.cuh 的 kKVCacheFp8Group 以及 decoder_state 的
+// validate_kv_side 保持一致（那里是 device 头，host TU 不能 include）。
+inline constexpr std::int32_t kFp8KvScaleGroup = 256;
+
 constexpr std::int32_t kHeadDim                      = 256;
 constexpr std::int32_t kQuantGroup                   = 64;
 constexpr float kExpectedScale                       = 0.0625f;
@@ -108,23 +113,29 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
     require_shape(cache.block_table, logical_pages, 1, 1, 1, op, "block table");
     require_contiguous_nonnull(cache.block_table, op, "block table");
 
-    if (cache.k_dtype == DType::BF16) {
-        if (cache.k_scale_pages.data != nullptr || cache.v_scale_pages.data != nullptr) {
-            throw std::invalid_argument(std::string(op) + ": BF16 KV cache must not have scales");
+    // scale 平面按侧校验：组数由该侧 codec 的 scale 密度决定（I8 每 64 维一组、FP8 每 256 维一个；
+    // bf16 侧完全没有 scale 平面）。k16v8 = K bf16（无 scale）+ V fp8（1 个 scale）正好落在这里。
+    const auto require_side_scales = [&](const Tensor& scales, DType code_dtype, const char* side) {
+        if (code_dtype == DType::BF16) {
+            if (scales.data != nullptr) {
+                throw std::invalid_argument(std::string(op) + ": BF16 " + side +
+                                            " must not have scale pages");
+            }
+            return;
         }
-        return static_cast<std::uint32_t>(capacity);
-    }
-
-    constexpr std::int32_t groups = kHeadDim / kQuantGroup;
-    if (cache.k_scale_pages.dtype != DType::FP16 || cache.v_scale_pages.dtype != DType::FP16) {
-        throw std::invalid_argument(std::string(op) + ": invalid KV cache scale dtype");
-    }
-    require_shape(cache.k_scale_pages, groups, kPagedKVPageSize, kv_heads, physical_pages, op,
-                  "cache k scale pages");
-    require_shape(cache.v_scale_pages, groups, kPagedKVPageSize, kv_heads, physical_pages, op,
-                  "cache v scale pages");
-    require_contiguous_nonnull(cache.k_scale_pages, op, "cache k scale pages");
-    require_contiguous_nonnull(cache.v_scale_pages, op, "cache v scale pages");
+        const std::int32_t group = code_dtype == DType::I8 ? kQuantGroup : kFp8KvScaleGroup;
+        if (scales.data == nullptr) {
+            throw std::invalid_argument(std::string(op) + ": missing " + side + " scale pages");
+        }
+        if (scales.dtype != DType::FP16) {
+            throw std::invalid_argument(std::string(op) + ": invalid KV cache scale dtype");
+        }
+        require_shape(scales, kHeadDim / group, kPagedKVPageSize, kv_heads, physical_pages, op,
+                      "cache scale pages");
+        require_contiguous_nonnull(scales, op, "cache scale pages");
+    };
+    require_side_scales(cache.k_scale_pages, cache.k_dtype, "K");
+    require_side_scales(cache.v_scale_pages, cache.v_dtype, "V");
     return static_cast<std::uint32_t>(capacity);
 }
 
@@ -180,23 +191,29 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
     require_shape(cache.block_tables, logical_pages, table_rows, 1, 1, op, "block tables");
     require_contiguous_nonnull(cache.block_tables, op, "block tables");
 
-    if (cache.k_dtype == DType::BF16) {
-        if (cache.k_scale_pages.data != nullptr || cache.v_scale_pages.data != nullptr) {
-            throw std::invalid_argument(std::string(op) + ": BF16 KV cache must not have scales");
+    // scale 平面按侧校验：组数由该侧 codec 的 scale 密度决定（I8 每 64 维一组、FP8 每 256 维一个；
+    // bf16 侧完全没有 scale 平面）。k16v8 = K bf16（无 scale）+ V fp8（1 个 scale）正好落在这里。
+    const auto require_side_scales = [&](const Tensor& scales, DType code_dtype, const char* side) {
+        if (code_dtype == DType::BF16) {
+            if (scales.data != nullptr) {
+                throw std::invalid_argument(std::string(op) + ": BF16 " + side +
+                                            " must not have scale pages");
+            }
+            return;
         }
-        return static_cast<std::uint32_t>(capacity);
-    }
-
-    constexpr std::int32_t groups = kHeadDim / kQuantGroup;
-    if (cache.k_scale_pages.dtype != DType::FP16 || cache.v_scale_pages.dtype != DType::FP16) {
-        throw std::invalid_argument(std::string(op) + ": invalid KV cache scale dtype");
-    }
-    require_shape(cache.k_scale_pages, groups, kPagedKVPageSize, kv_heads, physical_pages, op,
-                  "cache k scale pages");
-    require_shape(cache.v_scale_pages, groups, kPagedKVPageSize, kv_heads, physical_pages, op,
-                  "cache v scale pages");
-    require_contiguous_nonnull(cache.k_scale_pages, op, "cache k scale pages");
-    require_contiguous_nonnull(cache.v_scale_pages, op, "cache v scale pages");
+        const std::int32_t group = code_dtype == DType::I8 ? kQuantGroup : kFp8KvScaleGroup;
+        if (scales.data == nullptr) {
+            throw std::invalid_argument(std::string(op) + ": missing " + side + " scale pages");
+        }
+        if (scales.dtype != DType::FP16) {
+            throw std::invalid_argument(std::string(op) + ": invalid KV cache scale dtype");
+        }
+        require_shape(scales, kHeadDim / group, kPagedKVPageSize, kv_heads, physical_pages, op,
+                      "cache scale pages");
+        require_contiguous_nonnull(scales, op, "cache scale pages");
+    };
+    require_side_scales(cache.k_scale_pages, cache.k_dtype, "K");
+    require_side_scales(cache.v_scale_pages, cache.v_dtype, "V");
     return static_cast<std::uint32_t>(capacity);
 }
 
