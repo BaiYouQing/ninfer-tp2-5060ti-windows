@@ -2,6 +2,7 @@
 #include "ninfer/ops/gqa_attention.h"
 
 #include "core/layout.h"
+#include "ops/kernel/kv_codec_fp8.cuh"
 #include "ops/launcher/gqa_attention.h"
 
 #include <algorithm>
