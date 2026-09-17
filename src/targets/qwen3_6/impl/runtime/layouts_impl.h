@@ -196,8 +196,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .max_context = plan.capacity,
                 .kv_heads    = DFlashConfig::kv_heads,
                 .head_dim    = DFlashConfig::head_dim,
-                .dtype       = DType::BF16,
-                .quant_group = 0,
+                .k_dtype       = DType::BF16,
+                .v_dtype       = DType::BF16,
+                .k_quant_group = 0,
+                .v_quant_group = 0,
             };
             dflash.prefill_features = add_tensor(
                 builder, DType::BF16, {DFlashConfig::feature_rows, effective_prefill_chunk},
