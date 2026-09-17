@@ -209,8 +209,10 @@ PagedKVBatchLayerView single_row_batch_view(const PagedKVLayerView& cache) {
         .block_tables  = cache.block_table.view({cache.block_table.ne[0], 1}),
         .head_dim      = cache.head_dim,
         .num_kv_heads  = cache.num_kv_heads,
-        .dtype         = cache.k_dtype,
-        .quant_group   = cache.k_quant_group,
+        .k_dtype       = cache.k_dtype,
+        .v_dtype       = cache.v_dtype,
+        .k_quant_group = cache.k_quant_group,
+        .v_quant_group = cache.v_quant_group,
     };
 }
 
