@@ -27,22 +27,66 @@ NVIDIA GeForce RTX 5090，通过本地 CLI 或 OpenAI / Anthropic 兼容的 HTTP
 > 与协议面均未改变。设计决策与验证证据见
 > [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md)，署名见 [NOTICE](NOTICE)。
 
-NInfer 刻意只支持一组封闭的模型产物，而不是做一个通用模型运行时。本 fork 只用 **Qwen3.8-27B NVFP4**
-这一种模型形态，两个版本：
+## 权重
 
-| 模型 | 权重档 | NInfer 产物 | 大小 | SHA-256 |
-|---|---|---|---:|---|
-| [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer)（上游官方版） | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 B（20.02 GiB） | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
-| Qwen3.8-27B NVFP4 **W4A4**（本 fork 用版，本 README 所有 TP2 数据都是它测的） | `nvfp4-w4a4` | `qwen3_8_27b_nvfp4w4a4.ninfer` | 17,555,334,916 B（16.35 GiB） | 不分发 —— 见[下载模型](#下载模型) |
+本 fork 只跑一个模型：**Qwen3.8-27B NVFP4 W4A4**。`.ninfer` 产物不由本仓分发 —— 用仓内转换器从公开的
+源权重自行构建。
 
-上游那版 `nvfp4` 是**混合**量化：Text 0–55 层的 MLP 用 NVFP4，token embedding、attention 输入/输出投影、
-GDN 的 Q/K/V/Z 与输出投影、output head 以及其余 MLP 权重用行标度 FP8。它**不能用于 `--tp 2`** ——
-它的 BF16 例外层过不了列并行的融合权重绑定。**W4A4** 版才是 TP2 可用形态：线性层全程 NVFP4、激活也是
-4 bit，这也是它体积更小的原因。
+| 项 | 值 |
+|---|---|
+| 源（Hugging Face） | [`nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4`](https://huggingface.co/nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4/tree/main/W4A4) 的 `W4A4/` 子目录（ModelOpt NVFP4，group size 16，`variant = fast`） |
+| 源文件 | `model-nvfp4-fast.safetensors`（18,822,252,240 B，SHA-256 `9b7e1c4d839995ee9ed35ac682ecf31e81ae4bc6ddb4e3aaa7f585b786bb83a0`）与 `vision-mtp-bf16.safetensors`（1,770,897,648 B），加索引和 6 个前端资源 |
+| 源校验 | 目录里的 `SHA256SUMS`；`manifest.json` 的 `source_package_sha256 = 2d2eac20ceb1439ab85eda4c5d616150f1c1f4956729333cc6e6e15e49739b21` |
+| 转换器 | [`tools/convert/qwen3_8_27b/convert_w4a4.py`](tools/convert/qwen3_8_27b/convert_w4a4.py) |
+| 结果 | `qwen3_8_27b_nvfp4w4a4.ninfer`，17,555,334,916 B（16.35 GiB） |
 
-引擎另外还注册并接受上游的其余 identity（Qwen3.6-27B 两个档、Qwen3.8-27B 的 `groupwise-int`、
-Qwen3.6-35B-A3B）；它们不在本 fork 的构建与实测范围内。所有已注册产物的 Text、Vision、MTP、
-前缀复用、CLI 与 serving 路径都相同。
+### 产物是怎么转出来的
+
+```bash
+# 1. 取公开 checkpoint 的 W4A4 子目录
+hf download nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4 \
+  --include "W4A4/*" --local-dir src
+
+# 2. 转换
+python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
+  --src src/W4A4 --out models/qwen3_8_27b_nvfp4w4a4.ninfer
+
+# 3. 校验：重算每个对象，与产物逐字节比对
+python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
+  --src src/W4A4 --verify models/qwen3_8_27b_nvfp4w4a4.ninfer
+```
+
+转换器做了什么、以及刻意不做什么：
+
+- **复用引擎自己的编码器**：NVFP4 对象**逐字节重打包**，BF16/FP32 对象直通，W8/Q4/Q5/Q6 端点、MTP 模块与
+  视觉塔都过引擎加载时用的同一个编码器重新量化；
+- **融合投影按张量并行分片期望的物理行序输出**：`attention/query_key_gate_value` 为 `[Q | K | Gate | V]`
+  （query 与 gate 按 head 从 `q_proj` 里取，每 head 256 + 256 行）、`mlp/gate_up` 为 `[gate | up]`、
+  `gdn/query_key_value_z` 为 `[qkv | z]`；
+- **`gdn/convolution` 是转置而不是 reshape**：源里存成 `(C, 1, K)`，引擎按 `[K, C]` 读；直接 reshape 会
+  保留扁平顺序、静默搞坏全部 GDN 层；
+- **九层例外层保持 NVFP4**（Qwen3.6 的 NVFP4 recipe 会把它们留成 BF16）：源本来就是 NVFP4，转换器保留源、
+  不降精度；
+- **优化草稿头是算出来的**：由 output head 加频率语料导出（`--draft-ranking`，默认
+  `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64`），不是从源里搬的。
+
+校验门槛是逐字节比对，本 fork 的产物在 **1310 个张量对象 + 6 个前端资源**上全部通过。完整页面见
+[docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md)。
+
+### 引擎还注册了哪些产物
+
+NInfer 刻意只支持一组封闭的产物、不做通用模型运行时。引擎另外注册并接受上游的 identity —— 官方
+[`Qwen3.8-27B NVFP4`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) 产物
+（`qwen3_8_27b_nvfp4.ninfer`，21,492,695,040 B，SHA-256
+`bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`）、Qwen3.6-27B 两个档、
+Qwen3.8-27B 的 `groupwise-int`、Qwen3.6-35B-A3B —— 只是它们不在本 fork 的构建与实测范围内。当前构建只
+接受 version-2 容器，上面这些也都是 version 2。
+
+每个 `.ninfer` 文件里含 NInfer 需要的全部权重与前端资源，它不是 Transformers checkpoint、不是 Safetensors
+分发、也不是 GGUF。产物本身完整，而 GPU 常驻在进程启动时就已固定：**投机解码默认关闭**（MTP/DFlash 状态
+与优化草稿头不上卡），**视觉默认关闭**（权重、Vision scratch 与 request-transient 固定分配都不占）。要接受
+图像/视频输入就在 CLI 或服务进程上加 `--vision`，要投机解码就加 `--spec mtp --draft-tokens 3`。被关掉的
+能力不能再由后续请求打开。
 
 ## 快速开始
 
@@ -57,7 +101,7 @@ cmake --build build --parallel
 ```
 
 在双卡上以 K16V8 KV cache 起 27B 的 NVFP4 W4A4 产物（253,952 token 单槽，MTP3 投机解码 + 优化草稿头）。
-这个产物**不由本仓分发** —— 先按 [下载模型](#下载模型) 把它准备好并放进 `models/`：
+这个产物不由本仓分发 —— 先按上面的 [权重](#权重) 把它转出来并放进 `models/`：
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
@@ -69,27 +113,6 @@ cmake --build build --parallel
 
 环境要求见 [构建要求](#构建要求)，产物转换见
 [`docs/maintainer/qwen3.8-27b-w4a4-artifact.md`](docs/maintainer/qwen3.8-27b-w4a4-artifact.md)。
-
-## 下载模型
-
-上游官方那版用 Hugging Face CLI 下载（引擎另外也注册并接受其他上游 identity，但不在本 README 的覆盖范围）：
-
-```bash
-hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
-  qwen3_8_27b_nvfp4.ninfer \
-  --local-dir models
-```
-
-每个 `.ninfer` 文件里就含 NInfer 需要的全部权重与前端资源，它不是 Transformers checkpoint、不是
-Safetensors 分发、也不是 GGUF。另外，**投机解码默认关闭**（MTP 状态与优化草稿头不上卡），**视觉默认关闭**
-（权重、Vision scratch 与 request-transient 分配都不占）；要接受图像/视频输入就在 CLI 或服务进程上加
-`--vision`。
-
-### W4A4 产物的来源与转换方法
-
-| 来源（ModelScope） | 转换方法 |
-|---|---|
-| 合并微调模型 `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4`（W4A4 版），ModelOpt NVFP4 量化、group size 16 | 本仓不分发产物：用 `tools/convert/qwen3_8_27b/convert_w4a4.py` 自行转换；源布局、完整命令与验证门槛见 [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md) |
 
 ## KV cache 档位与长上下文上限
 

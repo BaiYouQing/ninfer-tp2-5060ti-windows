@@ -30,10 +30,11 @@ vision modules retained in BF16). It is not redistributed by this repository; a 
 
 | Fact | Value |
 |---|---|
-| source (ModelScope) | `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4` (W4A4 "fast" variant) |
+| source | [`nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4`](https://huggingface.co/nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4/tree/main/W4A4), subdirectory `W4A4` (`variant = fast`) |
 | producer | ModelOpt NVFP4, `quant_algo = NVFP4`, `group_size = 16` |
-| layout | one indexed checkpoint: `model-nvfp4-fast.safetensors` (NVFP4 text) + `vision-mtp-bf16.safetensors` (BF16 vision/MTP) + `model.safetensors.index.json` + the six frontend resources |
+| layout | one indexed checkpoint: `model-nvfp4-fast.safetensors` (18,822,252,240 B; NVFP4 text) + `vision-mtp-bf16.safetensors` (1,770,897,648 B; BF16 vision/MTP) + `model.safetensors.index.json` + the six frontend resources |
 | binding verification | `source_package_sha256` in the source `manifest.json`, plus the per-file `SHA256SUMS` |
+| source manifest facts | `precision = "W4A4 NVFP4 with retained BF16 control/head modules"`, `text_linear_counts = {NVFP4: 400, FP8: 0, BF16: 97}`, `language_model_layers = 64`, `tensor_count = 2399`, `file_bytes = 20616312752` |
 
 Verify the downloaded source before converting:
 
@@ -92,12 +93,14 @@ leaves expect. The converter implements these conventions:
 
 Known limitations and caveats:
 
-- **The nine exception layers are NVFP4, not BF16.** Unlike the Qwen3.6-27B NVFP4 tier (and the
-  upstream `qwen3.8-27b/nvfp4` artifact), this tier keeps the six attention `query_key_gate_value`
-  layers (3/7/11/15/19/23), the two attention `output` layers (3/7), and the GDN `output` layer (4)
-  in NVFP4, matching the source. The TP2 column-parallel fused-weight path only accepts NVFP4 or FP8
-  fused weights, so a BF16-exception artifact (the upstream `nvfp4` one) fails to bind on TP2; this
-  tier is the TP2-compatible W4A4 form.
+- **The nine exception layers are NVFP4, not BF16.** The Qwen3.6-27B NVFP4 recipe leaves six attention
+  `query_key_gate_value` layers (3/7/11/15/19/23), two attention `output` layers (3/7), and the GDN
+  `output` layer (4) in BF16; the W4A4 source stores them as NVFP4, so the converter keeps them that
+  way instead of down-converting. This states a property of the source, not of any artifact's
+  tensor-parallel support: upstream's `qwen3.8-27b/nvfp4` artifact (whose exception layers are
+  row-scaled FP8, not BF16) is the artifact the TP2 campaign in the repository README was run on.
+  Whether this W4A4 tier and that FP8 tier behave identically under `--tp 2` on this fork's hardware
+  has not been measured side by side.
 - **`gdn/convolution` is transposed, not reshaped.** The source stores the GDN causal-convolution
   weight as `(C, 1, K)`; the engine reads it as `[K, C]`. The converter transposes (and asserts the
   shape). A plain reshape would keep the flat order and silently corrupt all 48 GDN layers.

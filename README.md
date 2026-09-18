@@ -34,6 +34,75 @@ describe upstream; what this fork adds and measures is in the fork note below.
 > [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md).
 > See [NOTICE](NOTICE) for attribution.
 
+## The weights
+
+This fork runs one model: **Qwen3.8-27B NVFP4 W4A4**. The `.ninfer` artifact is not distributed here;
+build it from the published source with the in-tree converter.
+
+| | |
+|---|---|
+| Source | [`nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4`](https://huggingface.co/nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4/tree/main/W4A4), subdirectory `W4A4` — ModelOpt NVFP4, group size 16, `variant = fast` |
+| Source files | `model-nvfp4-fast.safetensors` (18,822,252,240 B, SHA-256 `9b7e1c4d839995ee9ed35ac682ecf31e81ae4bc6ddb4e3aaa7f585b786bb83a0`) and `vision-mtp-bf16.safetensors` (1,770,897,648 B), plus the index and six frontend resources |
+| Source check | the directory's `SHA256SUMS`, and `manifest.json` with `source_package_sha256 = 2d2eac20ceb1439ab85eda4c5d616150f1c1f4956729333cc6e6e15e49739b21` |
+| Converter | [`tools/convert/qwen3_8_27b/convert_w4a4.py`](tools/convert/qwen3_8_27b/convert_w4a4.py) |
+| Result | `qwen3_8_27b_nvfp4w4a4.ninfer`, 17,555,334,916 bytes (16.35 GiB) |
+
+### How the artifact is built
+
+```bash
+# 1. the W4A4 subdirectory of the published checkpoint
+hf download nerkyor/Qwen3.8-27B-EfficientThink-Uncensored-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4 \
+  --include "W4A4/*" --local-dir src
+
+# 2. convert
+python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
+  --src src/W4A4 --out models/qwen3_8_27b_nvfp4w4a4.ninfer
+
+# 3. verify: recompute every object and byte-compare it against the artifact
+python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
+  --src src/W4A4 --verify models/qwen3_8_27b_nvfp4w4a4.ninfer
+```
+
+What the converter does, and what it deliberately does not do:
+
+- it reuses the engine's own encoders. NVFP4 objects are **repacked byte-exactly**, BF16/FP32 objects
+  pass through, and the W8/Q4/Q5/Q6 endpoint, the MTP module and the vision tower are re-quantized
+  through the same encoder the engine loads with;
+- it emits the fused projections in the physical row order the tensor-parallel shards expect:
+  `attention/query_key_gate_value` as `[Q | K | Gate | V]` (query and gate taken per head from
+  `q_proj`, 256 + 256 rows per head), `mlp/gate_up` as `[gate | up]`, and `gdn/query_key_value_z` as
+  `[qkv | z]`;
+- it **transposes** `gdn/convolution`: the source stores it `(C, 1, K)` and the engine reads
+  `[K, C]`, so a plain reshape would keep the flat order and silently corrupt all GDN layers;
+- it keeps nine layers as NVFP4 that the Qwen3.6 NVFP4 recipe leaves in BF16. The source already
+  stores them as NVFP4, so the converter preserves the source instead of down-converting it;
+- it derives the optimized proposal head from the output head plus a frequency corpus
+  (`--draft-ranking`, default `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64`), so the
+  head is computed rather than copied out of the source.
+
+The verification gate is a byte comparison, and the conversion this fork ships passes it on **all
+1310 tensor objects plus the six frontend resources**. The full page is
+[docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md).
+
+### Other registered artifacts
+
+NInfer deliberately supports a closed set of artifacts rather than acting as a general model runtime.
+The engine also registers upstream's identities — the official
+[`Qwen3.8-27B NVFP4`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) artifact
+(`qwen3_8_27b_nvfp4.ninfer`, 21,492,695,040 bytes, SHA-256
+`bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`), Qwen3.6-27B in both weight
+profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B — and accepts them; they are outside what
+this fork is built and measured against. Current builds accept only the version-2 container, and all
+of those are version 2.
+
+Every `.ninfer` file contains the weights and frontend resources NInfer needs. It is not a
+Transformers checkpoint, Safetensors distribution, or GGUF file. Each artifact is complete, while GPU
+residency is fixed at process startup. Speculative decoding is off by default, so MTP/DFlash state and
+the optimized proposal head are not uploaded; vision is off by default too, so its weights, the Vision
+scratch phase and the frozen request-transient allocation are omitted. Add `--vision` to the CLI or
+server process that must accept image or video input, and `--spec mtp --draft-tokens 3` to the one
+that must speculate. Disabled capabilities cannot be enabled by a later request.
+
 ## Quick start
 
 Clone **this** repository (not upstream, and not the TP2 forks it descends from):
@@ -46,10 +115,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-Serve the 27B NVFP4 W4A4 artifact on two GPUs with the K16V8 KV cache (253,952-token single slot,
-MTP3 speculative decoding with the optimized draft head). That artifact is **not** distributed by
-this repository -- obtain it first as described in [Download a model](#download-a-model) and put it
-in `models/`:
+Serve the artifact built in [The weights](#the-weights) on two GPUs with the K16V8 KV cache
+(253,952-token single slot, MTP3 speculative decoding with the optimized draft head):
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
@@ -62,27 +129,6 @@ in `models/`:
 [Requirements](#requirements), [Build](#build) and
 [Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context) cover the prerequisites,
 artifact conversion and the complete option set.
-
-NInfer deliberately supports a closed set of model artifacts instead of acting as a general model
-runtime. This fork is built and measured against the **Qwen3.8-27B NVFP4** form of the model, in two
-variants:
-
-| Model | Weights | NInfer artifact | Size | SHA-256 |
-|---|---|---|---:|---|
-| [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) — upstream's | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 bytes (20.02 GiB) | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
-| Qwen3.8-27B NVFP4 **W4A4** — this fork's, the artifact every TP2 number here was measured on | `nvfp4-w4a4` | `qwen3_8_27b_nvfp4w4a4.ninfer` | 17,555,334,916 bytes (16.35 GiB) | not distributed — see [Download a model](#download-a-model) |
-
-The upstream `nvfp4` profile preserves its source's mixed allocation: NVFP4 MLP weights in Text
-layers 0–55, and row-scaled FP8 for the token embedding, attention input/output projections, GDN
-Q/K/V/Z and output projections, output head, and the remaining MLP weights. It is **not** usable at
-`--tp 2` — its BF16 exception layers fail the column-parallel fused-weight bind. The **W4A4** variant
-is the TP2-compatible form: its linear layers are NVFP4 with 4-bit activations throughout, which is
-also why it is the smaller of the two.
-
-The engine additionally registers the other upstream identities (Qwen3.6-27B in both weight
-profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B) and accepts them; they are outside what
-this fork is built and measured against. All registered artifacts retain the same Text, Vision, MTP,
-prefix-reuse, CLI, and serving routes.
 
 ## Performance
 
@@ -248,43 +294,6 @@ docker run --rm \
   --max-new 256
 ```
 
-## Download a model
-
-Download the upstream Qwen3.8-27B NVFP4 artifact with the Hugging Face CLI:
-
-```bash
-hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
-  qwen3_8_27b_nvfp4.ninfer \
-  --local-dir models
-```
-
-Current NInfer builds accept only the version-2 artifact container, and that file is version 2.
-The other registered identities download the same way from their `neroued/*` repositories; the one
-migration path (`python3 -m tools.artifact.migrate_v1_to_v2 <file>`) applies only to Qwen3.6
-artifacts published before their version-2 update, which this README does not cover.
-
-Each `.ninfer` file contains the weights and frontend resources needed by NInfer. It is not a
-Transformers checkpoint, Safetensors distribution, or GGUF file.
-
-Each artifact is complete, while GPU residency is fixed at process startup. Speculative decoding is
-disabled by default, so MTP/DFlash state and the optimized proposal head are not uploaded.
-Vision is also disabled by default, so its weights, Vision scratch phase, and frozen
-request-transient allocation are omitted. Add `--vision` to the CLI or server process that must
-accept image or video input. Disabled capabilities cannot be enabled by a later request. DFlash is
-available only for the 35B-A3B target and is text-only.
-
-### The W4A4 artifact this fork is validated on
-
-The TP2 measurements in this README, and the KV-tier, prefix-reuse and `/health` work added by this
-fork, were taken on a **Qwen3.8-27B NVFP4 W4A4** artifact that this repository does not distribute:
-
-| Artifact | Source | How to obtain it |
-|---|---|---|
-| `qwen3_8_27b_nvfp4w4a4.ninfer` (NVFP4 **W4A4**; 4-bit weights *and* 4-bit activations) | a merged Qwen3.8-27B fine-tune published on ModelScope as `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4` (the W4A4 variant), quantized with ModelOpt NVFP4, group size 16 | **Not distributed here.** Convert it yourself with `tools/convert/qwen3_8_27b/convert_w4a4.py`; the source layout, the exact command and the verification gate are in [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md) |
-
-The W4A4 form is the one to use at `--tp 2`: the upstream `nvfp4` artifact's BF16 exception layers
-fail the column-parallel fused-weight bind.
-
 ## Run the CLI
 
 ```bash
@@ -355,7 +364,7 @@ path and rejects `--tp 2` at startup.
 The original TP2/YaRN campaign below was run on two RTX 5090s against the Qwen3.8-27B NVFP4
 artifact. The `### KV-cache tiers and long-context limits` subsection is the one part of this
 section re-measured by this fork, on **2× RTX 5060 Ti** (16 GiB each) against the W4A4 artifact
-described under [Download a model](#download-a-model); the two hardware profiles are kept separate
+described under [The weights](#the-weights); the two hardware profiles are kept separate
 and no figure is compared across them.
 
 ### Usage
