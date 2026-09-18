@@ -255,7 +255,8 @@ GPQA-Diamond、ERQA、RealWorldQA，EvalScope 1.9.0、单样本）。注意那�
 - `pkg-config`；
 - FFmpeg 开发库：`libavformat >= 60`、`libavcodec >= 60`、`libavutil >= 58`、`libswscale >= 7`；
 - `libcurl >= 7.85`；
-- Ninja（用下面的命令时需要）。
+- Ninja（用下面的命令时需要）；
+- Python 3 加 `torch`、`safetensors` —— 只给 `tools/convert/` 下的转换与校验工具用；引擎本身构建不需要 Python。
 
 构建只接受 `120a` 这一种 CUDA 架构，没有 install target，也不发布二进制包 —— NInfer 就在源码构建树里跑。
 

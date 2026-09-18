@@ -184,7 +184,9 @@ NInfer currently requires:
 - FFmpeg development libraries: `libavformat >= 60`, `libavcodec >= 60`,
   `libavutil >= 58`, and `libswscale >= 7`;
 - `libcurl >= 7.85`;
-- Ninja, when using the commands below.
+- Ninja, when using the commands below;
+- Python 3 with `torch` and `safetensors`, for the conversion and verification tools under
+  `tools/convert/` — the engine build itself does not need Python.
 
 The build rejects CUDA architectures other than `120a`. There is no install target or packaged
 binary distribution; NInfer is run from its source build tree.
