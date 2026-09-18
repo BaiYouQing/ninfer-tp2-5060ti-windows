@@ -488,6 +488,13 @@ If you want `nvfp4` / `k8v4` KV tiers or upstream's newest single-GPU scheduling
 If you want tensor-parallel serving on two consumer cards with the `k16v8` tier and MTP prefix reuse
 that actually hits, this fork is the line to use.
 
+## Getting help
+
+**Ask a coding agent first.** The maintainer does — questions sent to a human here usually get
+forwarded to an agent that has this repository open, so pointing your own agent at this README and
+the [`docs/`](docs/) tree will get you an answer sooner. Issues are enabled if you want to leave a
+record of the problem.
+
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md)
