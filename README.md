@@ -46,8 +46,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-Serve the 27B NVFP4 W4A4 artifact on two GPUs with the K16V8 KV cache (253,952-token context,
-MTP3 speculative decoding with the optimized draft head):
+Serve the 27B NVFP4 W4A4 artifact on two GPUs with the K16V8 KV cache (253,952-token single slot,
+MTP3 speculative decoding with the optimized draft head). That artifact is **not** distributed by
+this repository -- obtain it first as described in [Download a model](#download-a-model) and put it
+in `models/`:
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
@@ -57,7 +59,6 @@ MTP3 speculative decoding with the optimized draft head):
   --spec mtp --draft-tokens 3 --lm-head-draft --max-concurrency 1 --cors
 ```
 
-That artifact is not distributed by this repository -- see [Download a model](#download-a-model).
 [Requirements](#requirements), [Build](#build) and
 [Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context) cover the prerequisites,
 artifact conversion and the complete option set.

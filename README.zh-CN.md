@@ -53,7 +53,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-在双卡上以 K16V8 KV cache 起 27B 的 NVFP4 W4A4 产物（253,952 token 上下文，MTP3 投机解码 + 优化草稿头）：
+在双卡上以 K16V8 KV cache 起 27B 的 NVFP4 W4A4 产物（253,952 token 单槽，MTP3 投机解码 + 优化草稿头）。
+这个产物**不由本仓分发** —— 先按 [下载模型](#下载模型) 把它准备好并放进 `models/`：
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
@@ -63,8 +64,8 @@ cmake --build build --parallel
   --spec mtp --draft-tokens 3 --lm-head-draft --max-concurrency 1 --cors
 ```
 
-这个产物**不由本仓分发**，见 [下载模型](#下载模型)。环境要求见 [构建要求](#构建要求)，
-产物转换见 [`docs/maintainer/qwen3.8-27b-w4a4-artifact.md`](docs/maintainer/qwen3.8-27b-w4a4-artifact.md)。
+环境要求见 [构建要求](#构建要求)，产物转换见
+[`docs/maintainer/qwen3.8-27b-w4a4-artifact.md`](docs/maintainer/qwen3.8-27b-w4a4-artifact.md)。
 
 ## 下载模型
 
