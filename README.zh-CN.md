@@ -33,7 +33,7 @@ OpenAI / Anthropic 兼容的 HTTP 接口处理文本、图像与视频输入；�
 
 | | 官方版（上游的） | 本 fork 的 W4A4 |
 |---|---|---|
-| 产物 | `qwen3_8_27b_nvfp4.ninfer` | `qwen3_8_27b_nvfp4w4a4.ninfer` |
+| 产物 | [`qwen3_8_27b_nvfp4.ninfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | `qwen3_8_27b_nvfp4w4a4.ninfer`，见下方转换 |
 | 体积 | 21,492,695,040 B（20.02 GiB） | 17,555,334,916 B（16.35 GiB） |
 | `--tp 2` 下每卡权重 | 10.08 GiB | 8.66 GiB |
 | 量化 | MLP 走 NVFP4，其余走行标度 FP8 | 全程 NVFP4，含 4 bit 激活 |

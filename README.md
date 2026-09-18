@@ -36,7 +36,7 @@ This fork runs **Qwen3.8-27B NVFP4** in two interchangeable forms. Both were mea
 
 | | official — upstream's | this fork's W4A4 |
 |---|---|---|
-| artifact | `qwen3_8_27b_nvfp4.ninfer` | `qwen3_8_27b_nvfp4w4a4.ninfer` |
+| artifact | [`qwen3_8_27b_nvfp4.ninfer`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | `qwen3_8_27b_nvfp4w4a4.ninfer`, converted below |
 | size | 21,492,695,040 B (20.02 GiB) | 17,555,334,916 B (16.35 GiB) |
 | weights per card at `--tp 2` | 10.08 GiB | 8.66 GiB |
 | quantization | NVFP4 MLP plus row-scaled FP8 elsewhere | NVFP4 throughout, including 4-bit activations |
