@@ -2840,12 +2840,15 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.effective_max_context = effective_max_context;
     out.yarn_mscale           = yarn_mscale;
     out.kv_capacity           = kv_capacity;
-    // 档位反查按 per-side 组合：K 侧决定主档，k16v8 由 V 侧是 e4m3 区分。
-    out.kv_cache = kv_dtype == DType::BF16
-                       ? (kv_value_dtype == DType::FP8_E4M3FN ? KvCacheStorage::Bf16KeyFp8Value
-                                                              : KvCacheStorage::BFloat16)
-                   : kv_dtype == DType::FP8_E4M3FN ? KvCacheStorage::Fp8E4M3Row256
-                                                   : KvCacheStorage::Int8Group64;
+    // 档位反查按 per-side 组合：K=BF16 时由 V 侧区分 k16v8（e4m3）/ k16i8（i8）/ 纯 bf16。
+    out.kv_cache =
+        kv_dtype == DType::BF16
+            ? (kv_value_dtype == DType::FP8_E4M3FN
+                   ? KvCacheStorage::Bf16KeyFp8Value
+                   : kv_value_dtype == DType::I8 ? KvCacheStorage::Bf16KeyInt8Value
+                                                 : KvCacheStorage::BFloat16)
+            : kv_dtype == DType::FP8_E4M3FN ? KvCacheStorage::Fp8E4M3Row256
+                                            : KvCacheStorage::Int8Group64;
     DeviceArena& weights = *model.weights_arena;
     out.weights = ArenaMemorySummary{weights.capacity(), weights.used(), weights.peak_used()};
     out.sequence =

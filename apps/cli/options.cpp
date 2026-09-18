@@ -101,6 +101,7 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "int8") { return KvCacheStorage::Int8Group64; }
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     if (text == "k16v8") { return KvCacheStorage::Bf16KeyFp8Value; }
+    if (text == "k16i8") { return KvCacheStorage::Bf16KeyInt8Value; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
@@ -124,7 +125,7 @@ std::string usage_text(const char* argv0) {
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--rope native|yarn] [--yarn-factor F] [--yarn-origin O]\n"
            "       [--device N] [--tp 1|2] [--devices N,N]\n"
-           "       [--kv-dtype bf16|int8|fp8|k16v8] [--spec mtp|dflash --draft-tokens N]\n"
+           "       [--kv-dtype bf16|int8|fp8|k16v8|k16i8] [--spec mtp|dflash --draft-tokens N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"

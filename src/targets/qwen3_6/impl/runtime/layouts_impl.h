@@ -834,6 +834,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 //   int8  : K/V 都 I8 + 每 64 组 1 个 fp16 scale
 //   fp8   : K/V 都 FP8_E4M3FN + 每 256 维 1 个 fp16 scale
 //   k16v8 : K bf16 无 scale、V FP8_E4M3FN（每 256 维 1 个 scale）
+//   k16i8 : K bf16 无 scale、V I8（每 64 维 1 个 scale）
 // 注意：这里只负责"建池/建视图"；**是否真的能用**由内核路由决定（gqa_attention.cpp 会在
 // V 侧 codec 尚未接通时显式拒绝，避免拿 bf16 内核去读 fp8 的 V 而静默出错）。
 DType kv_cache_k_dtype(KvCacheStorage storage) {
@@ -842,6 +843,7 @@ DType kv_cache_k_dtype(KvCacheStorage storage) {
     case KvCacheStorage::Int8Group64: return DType::I8;
     case KvCacheStorage::Fp8E4M3Row256: return DType::FP8_E4M3FN;
     case KvCacheStorage::Bf16KeyFp8Value: return DType::BF16;
+    case KvCacheStorage::Bf16KeyInt8Value: return DType::BF16;
     }
     throw std::invalid_argument("unknown kv cache storage");
 }
@@ -852,6 +854,7 @@ DType kv_cache_v_dtype(KvCacheStorage storage) {
     case KvCacheStorage::Int8Group64: return DType::I8;
     case KvCacheStorage::Fp8E4M3Row256: return DType::FP8_E4M3FN;
     case KvCacheStorage::Bf16KeyFp8Value: return DType::FP8_E4M3FN;
+    case KvCacheStorage::Bf16KeyInt8Value: return DType::I8;
     }
     throw std::invalid_argument("unknown kv cache storage");
 }
@@ -862,6 +865,7 @@ std::int32_t kv_cache_k_quant_group(KvCacheStorage storage) {
     case KvCacheStorage::Int8Group64: return qwen3_6::kKvQuantGroup;
     case KvCacheStorage::Fp8E4M3Row256: return qwen3_6::kKvFp8ScaleGroup;
     case KvCacheStorage::Bf16KeyFp8Value: return 0;
+    case KvCacheStorage::Bf16KeyInt8Value: return 0;
     }
     throw std::invalid_argument("unknown kv cache storage");
 }
@@ -872,6 +876,7 @@ std::int32_t kv_cache_v_quant_group(KvCacheStorage storage) {
     case KvCacheStorage::Int8Group64: return qwen3_6::kKvQuantGroup;
     case KvCacheStorage::Fp8E4M3Row256: return qwen3_6::kKvFp8ScaleGroup;
     case KvCacheStorage::Bf16KeyFp8Value: return qwen3_6::kKvFp8ScaleGroup;
+    case KvCacheStorage::Bf16KeyInt8Value: return qwen3_6::kKvQuantGroup;
     }
     throw std::invalid_argument("unknown kv cache storage");
 }
