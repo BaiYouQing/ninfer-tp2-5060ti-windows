@@ -76,9 +76,12 @@ What the converter does, and what it deliberately does not do:
   `[K, C]`, so a plain reshape would keep the flat order and silently corrupt all GDN layers;
 - it keeps nine layers as NVFP4 that the Qwen3.6 NVFP4 recipe leaves in BF16. The source already
   stores them as NVFP4, so the converter preserves the source instead of down-converting it;
-- it derives the optimized proposal head from the output head plus a frequency corpus
-  (`--draft-ranking`, default `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64`), so the
-  head is computed rather than copied out of the source.
+- it builds the optimized proposal head from a frequency ranking (`--draft-ranking`, default
+  `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64`). The ranking holds, per token, how
+  often the model's own teacher-forced argmax emitted it over a 72k-conversation corpus; the
+  converter takes the top 131,072 tokens (of 248,320) plus every special token, slices those rows out
+  of the output head into `text/draft_head`, and writes their ids as `text/draft_head_token_ids`. The
+  head is computed, not copied out of the source, so a different corpus yields a different head.
 
 The verification gate is a byte comparison, and the conversion this fork ships passes it on **all
 1310 tensor objects plus the six frontend resources**. The three steps above were re-run from the
