@@ -108,7 +108,9 @@ The engine also registers upstream's identities — the official
 profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B — and accepts them; they are outside what
 this fork is built and measured against, with one measurement worth recording: the official `nvfp4`
 artifact was also run at `--tp 2` here, and it loads and generates normally on 2× RTX 5060 Ti (10.08
-GiB of weights per card, 38 tok/s decode with MTP off). With `int8` KV, a single slot fits that
+GiB of weights per card; 38 tok/s decode with MTP off, and 76–86 tok/s with `--spec mtp
+--draft-tokens 3 --lm-head-draft`). The W4A4 form carries 16% less weight per card and decodes at
+106 tok/s on the same `int8` tier. With `int8` KV, a single slot fits that
 artifact's whole 262,144-token native ceiling and still leaves 842 MiB free per card — the same
 residual under `ninfer-serve` as under the CLI, because the media and response buffers are not
 reserved while vision is off. The W4A4 form
