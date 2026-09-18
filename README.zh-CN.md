@@ -4,28 +4,27 @@
 
 > 跑在**两张消费级卡**上的 NInfer 张量并行版。在 **2× RTX 5060 Ti（每卡 16 GiB）** 上实测：一份 27B 模型
 > 常驻两块卡、**单槽 253,952 token 上下文**、四档 KV cache（`bf16` / `int8` / `fp8` / `k16v8`）、
-> MTP3 投机解码且前缀复用真正命中、`/health` 如实反映引擎可用性。本树继承的上游单卡 RTX 5090 工作
-> （含 YaRN 的 1,048,576 token 路径）属于上游；正文里哪张表来自哪台机器都有标注。
+> MTP3 投机解码且前缀复用真正命中、`/health` 如实反映引擎可用性。
 
-NInfer 是从零写的 C++/CUDA 推理引擎，只支持**显式注册**的 Qwen 系列 checkpoint。它面向一块
-NVIDIA GeForce RTX 5090，通过本地 CLI 或 OpenAI / Anthropic 兼容的 HTTP 接口处理文本、图像与
-视频输入。27B 执行包另外支持在**两块** RTX 5090 上做张量并行，并可用 YaRN 位置缩放把上下文
-拉到 1,048,576 token。上面这段描述的是**上游**；本 fork 加了什么、实测了什么，见下面的 fork 说明。
+NInfer 是从零写的 C++/CUDA 推理引擎，只支持**显式注册**的 Qwen 系列 checkpoint。它通过本地 CLI 或
+OpenAI / Anthropic 兼容的 HTTP 接口处理文本、图像与视频输入；可以在单卡上跑，27B 执行包也可以在**两块**
+卡上做张量并行 —— 见[双卡（TP2）](#双卡tp2)。上面这段描述的是**上游**；本 fork 加了什么、实测了什么，
+见下面的 fork 说明。
 
 > **这是一个 fork。** 上游是 [Neroued/ninfer](https://github.com/Neroued/ninfer)；本树的起点是上游
 > 的 `feaf4dd`，经由 TP2 这条线
 > （[wamansou/ninfer-tp2-1m](https://github.com/wamansou/ninfer-tp2-1m)、
 > [giocom/ninfer-3060X2](https://github.com/giocom/ninfer-3060X2)）继承而来，在其上为 27B 执行包加了
-> 两件事：**双卡张量并行**（`--tp 2 --devices A,B`，把每卡权重与 KV 常驻减半，长上下文下约快 40%；
-> 一个进程、一份模型、两块卡，不用 NVLink，也不是分布式服务），以及 **YaRN ×4 位置缩放**
-> （`--rope yarn`，把注册的原生 262,144 token 上限提到 1,048,576）。
+> **双卡张量并行**（`--tp 2 --devices A,B`：把每卡权重与 KV 常驻减半；一个进程、一份模型、两块卡，
+> 不用 NVLink，也不是分布式服务）。
 >
 > **本 fork 又加了三项**：**KV cache 档位**（`--kv-dtype bf16|int8|fp8|k16v8`）、**在 `--tp 2` 下真正生效
 > 的 MTP 前缀复用**、以及**如实反映引擎可用性的 `/health`**（配合 supervisord 自愈）。这三项的实测平台是
 > **2× RTX 5060 Ti（每卡 16 GiB）**。`--tp 1` 的贪心输出与 `feaf4dd` 逐字节一致
 > （见 [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md)）；单卡行为、支持的 identity、产物格式
 > 与协议面均未改变。设计决策与验证证据见
-> [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md)，署名见 [NOTICE](NOTICE)。
+> [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md)（该文档是上游的，也涵盖本
+> fork 未使用的 YaRN 扩展位置路径），署名见 [NOTICE](NOTICE)。
 
 ## 权重
 
@@ -161,6 +160,42 @@ curl http://127.0.0.1:8815/v1/chat/completions \
 usage 计量），以及由 prompt 渲染的函数工具；`/health` 报告引擎可用性。`model` 字段默认等于产物的
 `identity.model_id`，只有要发布部署专属别名时才需要 `--model-id`。详见 [CLI](docs/cli.md) 与
 [HTTP 服务](docs/serving.md)。
+
+## 双卡（TP2）
+
+`--tp 2` 把一份常驻模型分到两块卡上：一个进程、一份模型、两个 CUDA 设备，不用 NVLink，也不是分布式服务。
+它是**容量特性**而不是横向扩展 —— 每卡权重与 KV 常驻减半。它实现在 27B 执行包上（`qwen3.6-27b` 与
+`qwen3.8-27b`，两个权重档都行）；`qwen3.6-35b-a3b` 没有张量并行路径，`--tp 2` 启动即拒。
+
+本 README 发布的每一个双卡数字，都是在 **2× RTX 5060 Ti（每卡 16 GiB）** 上对[权重](#权重)里那个 W4A4
+产物测的。
+
+**用法**见[快速开始](#快速开始)与[用法](#用法)。几条硬约束：
+
+- `--tp 2` 必须显式给 `--devices A,B`，两块卡要同 compute capability；`--tp 1` 仍是默认；
+- `--kv-capacity` 必须 ≥ `--max-context`；要把某档顶到它的上限就得用**显式**容量（`auto` 会多留 512 MiB）；
+- 16 GiB 卡上 `--max-concurrency 1` 是算术：下一节的档位表就是单槽的成本，`k16v8` 在 253,952 上放不下第二槽；
+- `--spec dflash` 与 `--vision` 在 `--tp 2` 下启动即拒；MTP（`--spec mtp --draft-tokens 1..5`，可加
+  `--lm-head-draft`）在 `--tp 2` 下工作，**包括前缀复用**；
+- `--rope yarn`（本线从上游继承的扩展位置路径）存在但本 fork 未使用：上限 253,952 低于原生 262,144，
+  不需要位置缩放，也没有测过。
+
+**已知限制**（与 TP2 和本定版相关）：
+
+- 视觉只在 `--tp 1` 下可用（编码器没有分片路径，`--tp 2 --vision` 启动即拒）；
+- **P2P 取决于板子**：上游在两块 5090 上测得 `cudaDeviceCanAccessPeer` 为 0、集合通信遂走 PCIe 主机中转；
+  本 fork 实测的两块 5060 Ti 上该值是**双向 1**。无论哪种，一个 decode token 是 128 次 reduce 加一次 logit
+  all-gather，CUDA Graph 下整套集合通信相对每轮约 28 ms 的权重读取很小；
+- **前缀复用在 `--tp 2` 下可用，但有两种降级**：本 fork 实现了 TP2 路径上的 retained-state 续跑，续写引擎仍
+  持有的前缀会命中（`reuse=restore_turn_checkpoint`）；当保留的 base 已覆盖整个 prompt（没有后缀可算）时
+  降级为全量 prefill；命中要求"**续写同一个前缀**"，只共享一段更早的公共前缀不算命中。任何情况下答案不变、
+  请求不失败；
+- MTP 与纯解码"输出等价、但不逐位相同"：verify 一轮按 `K+1` 列算、普通一轮按 1 列算，GEMM shape 不同 ⇒
+  贪心流可能在近似并列的 token 上翻转，但每个落地的 token 仍是目标模型自己的 argmax；
+- 命中的 prefill 与冷启动可能在最后几位不同（见上一节）；
+- FP8 两档 prefill 比 `int8` 慢约 9–14%（KV 暂存路径未上 `cp.async`），decode 不受影响；
+- `k16v8` 单槽到不了 262144（BF16 key 每 token 26.2 KiB ⇒ chunk1024 上限 253952、chunk4096 为 229376）；
+- `--ignore-eos` 是诊断 flag，不是产品输出路径。
 
 ## KV cache 档位与长上下文上限
 

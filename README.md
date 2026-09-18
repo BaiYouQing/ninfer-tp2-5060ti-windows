@@ -5,33 +5,28 @@
 > Tensor-parallel NInfer on two consumer cards. Qualified on **2× RTX 5060 Ti (16 GiB each)**: one
 > 27B model resident across both GPUs, a **253,952-token single-slot context**, four KV-cache tiers
 > (`bf16` / `int8` / `fp8` / `k16v8`), MTP3 speculative decoding with prefix reuse that actually
-> hits, and a `/health` that reports engine availability. The single-GPU RTX 5090 work this tree
-> inherits -- including the YaRN 1,048,576-token path -- is upstream's; the body marks which figures
-> come from which hardware.
+> hits, and a `/health` that reports engine availability.
 
-NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints on a
-single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
-OpenAI-/Anthropic-compatible HTTP APIs. The 27B execution package additionally runs tensor-parallel
-across two RTX 5090s and, with YaRN positional scaling, serves contexts up to 1,048,576 tokens --
-see [Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context). The paragraphs above
-describe upstream; what this fork adds and measures is in the fork note below.
+NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints. It runs
+text, image, and video prompts through a local CLI or OpenAI-/Anthropic-compatible HTTP APIs, on one
+GPU, or -- for the 27B execution package -- tensor-parallel across two: see
+[Dual-GPU (TP2)](#dual-gpu-tp2). The paragraphs below describe upstream; what this fork adds and
+measures is in the fork note.
 
 > **This is a fork.** Upstream is [Neroued/ninfer](https://github.com/Neroued/ninfer); this tree
 > branches from its commit `feaf4dd` via the TP2 line
 > ([wamansou/ninfer-tp2-1m](https://github.com/wamansou/ninfer-tp2-1m),
-> [giocom/ninfer-3060X2](https://github.com/giocom/ninfer-3060X2)) and, on that base, adds two
-> things to the 27B execution package. **Dual-GPU tensor parallelism** (`--tp 2 --devices A,B`)
-> halves per-card weight and KV residency and is ~40% faster at long context — one resident model,
-> one process, two devices, no NVLink and no distributed serving. **YaRN ×4 positional scaling**
-> (`--rope yarn`) raises the addressable ceiling from the registered 262,144 tokens to 1,048,576,
-> computed to match vLLM as deployed and guarded by a drift test against the installed vLLM. This
-> fork further adds **KV-cache tiers** (`--kv-dtype bf16|int8|fp8|k16v8`), a **working MTP prefix
-> reuse at `--tp 2`**, and a **truthful `/health`** with supervisor-driven self-heal; those three
-> were measured on **2× RTX 5060 Ti (16 GiB each)**. `--tp 1` output is byte-identical to `feaf4dd`
-> on the greedy cases in [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md), and
-> single-GPU behaviour, supported identities, artifact format, and protocol surfaces are unchanged.
-> The design decisions, numerical contracts, and qualification evidence behind both features are in
-> [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md).
+> [giocom/ninfer-3060X2](https://github.com/giocom/ninfer-3060X2)) and, on that base, adds **dual-GPU
+> tensor parallelism** (`--tp 2 --devices A,B`) to the 27B execution package: one resident model, one
+> process, two devices, no NVLink and no distributed serving, halving per-card weight and KV residency.
+> This fork further adds **KV-cache tiers** (`--kv-dtype bf16|int8|fp8|k16v8`), a **working MTP prefix
+> reuse at `--tp 2`**, and a **truthful `/health`** with supervisor-driven self-heal; those three were
+> measured on **2× RTX 5060 Ti (16 GiB each)**. `--tp 1` output is byte-identical to `feaf4dd` on the
+> greedy cases in [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md), and single-GPU
+> behaviour, supported identities, artifact format, and protocol surfaces are unchanged. The design
+> decisions, numerical contracts, and qualification evidence are in
+> [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md) -- that document is
+> upstream's, and also covers the YaRN extended-position work this fork does not use.
 > See [NOTICE](NOTICE) for attribution.
 
 ## The weights
@@ -146,8 +141,8 @@ Serve the artifact built in [The weights](#the-weights) on two GPUs with the K16
 ```
 
 [Requirements](#requirements), [Build](#build) and
-[Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context) cover the prerequisites,
-artifact conversion and the complete option set.
+[Dual-GPU (TP2)](#dual-gpu-tp2) cover the prerequisites, artifact conversion and the complete option
+set.
 
 ## Performance
 
@@ -187,8 +182,8 @@ binary distribution; NInfer is run from its source build tree.
 
 ## Build
 
-Clone **this** repository — upstream has neither `--tp 2` nor `--rope yarn`, and neither do the
-other TP2 forks carry these KV tiers.
+Clone **this** repository — upstream has no `--tp 2`, and neither do the other TP2 forks carry these
+KV tiers.
 
 ```bash
 git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
@@ -262,45 +257,37 @@ The server also implements OpenAI Responses Core (typed Items, semantic SSE, loc
 state, and function calls) plus Anthropic Messages, token counting, and multimodal input. See
 [HTTP serving](docs/serving.md).
 
-## Dual-GPU (TP2) and YaRN 1M context
+## Dual-GPU (TP2)
 
-`--tp 2` splits one resident model across two RTX 5090s, and `--rope yarn` raises the addressable
-context ceiling from the registered native 262,144 tokens to 1,048,576. The two features are
-independent -- TP2 halves per-card weight and KV residency at any context, YaRN extends positions
-at either `--tp` width -- but 1,048,576 tokens only fits when both are used together with INT8 KV.
-
-TP2 is a capacity feature, not a scale-out feature: one process, one resident model, two CUDA
-devices, no NVLink and no distributed serving. It is implemented for the 27B execution package
+`--tp 2` splits one resident model across two GPUs: one process, one resident model, two CUDA
+devices, no NVLink and no distributed serving. It is a capacity feature rather than scale-out — it
+halves per-card weight and KV residency. It is implemented for the 27B execution package
 (`qwen3.6-27b` and `qwen3.8-27b`, either weight profile); `qwen3.6-35b-a3b` has no tensor-parallel
 path and rejects `--tp 2` at startup.
 
-The original TP2/YaRN campaign below was run on two RTX 5090s against the Qwen3.8-27B NVFP4
-artifact. The `### KV-cache tiers and long-context limits` subsection is the one part of this
-section re-measured by this fork, on **2× RTX 5060 Ti** (16 GiB each) against the W4A4 artifact
-described under [The weights](#the-weights); the two hardware profiles are kept separate
-and no figure is compared across them.
+Every two-card number this README publishes was taken on **2× RTX 5060 Ti (16 GiB each)** against the
+W4A4 artifact described under [The weights](#the-weights).
 
 ### Usage
 
 ```bash
-# 1,048,576-token context, both GPUs, INT8 KV, MTP3 speculative decoding
-./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
+# both GPUs, K16V8 KV, a 253,952-token single slot, MTP3 with the optimized proposal head
+./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
   --tp 2 --devices 0,1 \
-  --rope yarn --yarn-factor 4.0 --yarn-origin 262144 \
-  --max-context 1048576 --kv-dtype int8 --kv-capacity auto \
-  --max-concurrency 1 \
-  --spec mtp --draft-tokens 3 --lm-head-draft
+  --max-context 253952 --kv-capacity 253952 --prefill-chunk 1024 \
+  --kv-dtype k16v8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --max-concurrency 1
 ```
 
-The same flags drive the CLI; add `--no-thinking` when a short `--max-new` budget must reach the
+The same flags drive the CLI; add `--no-thinking` when a short `--max-new` budget has to reach the
 answer channel, because at this checkpoint's default thinking mode a 16-token budget is consumed
 entirely inside the reasoning stream:
 
 ```bash
-./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer \
+./build/apps/ninfer models/qwen3_8_27b_nvfp4w4a4.ninfer \
   --tp 2 --devices 0,1 \
-  --rope yarn --yarn-factor 4.0 --yarn-origin 262144 \
-  --max-context 1048576 --kv-dtype int8 --kv-capacity auto \
+  --max-context 253952 --kv-capacity 253952 --kv-dtype k16v8 \
   --messages long_prompt.json --max-new 256 --no-thinking
 ```
 
@@ -311,14 +298,16 @@ entirely inside the reasoning stream:
   the token ids, the generated text and the deterministic summary rows to be byte-equal. Its scope
   is exactly that: greedy text decode, `--tp 1`, `--rope native`, NVFP4 weights, `qwen3.8-27b`, MTP
   off, concurrency 1. See `tests/data/tp1-golden/MANIFEST.md`.
-- `--rope yarn` needs `--yarn-origin` to equal the artifact's registered native capacity
-  (`262144`); `--yarn-factor` is a finite value in `[1.0, 64.0]` and `origin x factor` must be a
-  whole token count at or below `1048576`.
-- `--kv-dtype int8` is mandatory at 1M: BF16 KV needs four times the pool and does not fit.
-- `--max-concurrency 1` is arithmetic, not policy, at 1M -- one sequence costs 16.66 GiB per device
-  without MTP and 17.69 GiB with it, so a second slot cannot fit on a 32 GiB card.
-- MTP speculative decoding (`--spec mtp --draft-tokens 1..5`, optionally `--lm-head-draft`) works
-  at `--tp 2` including at 1M. `--spec dflash` and `--vision` are rejected at `--tp 2`.
+- `--kv-capacity` must be at least `--max-context`. The explicit form is what fits a tier at its
+  ceiling; `auto` also keeps a 512 MiB sizing headroom.
+- `--max-concurrency 1` is arithmetic on 16 GiB cards: the tier table below is what one slot costs,
+  and `k16v8` at 253,952 leaves no room for a second.
+- MTP speculative decoding (`--spec mtp --draft-tokens 1..5`, optionally `--lm-head-draft`) works at
+  `--tp 2`, including compatible-prefix reuse. `--spec dflash` and `--vision` are rejected at
+  `--tp 2`.
+- `--rope yarn`, the extended-position path this line inherits from upstream, is available but unused
+  here: this fork's ceiling is 253,952 tokens, below the registered native 262,144, so no rope
+  scaling is needed and none is measured.
 
 See the [CLI guide](docs/cli.md) and [HTTP serving](docs/serving.md) for the full option contract.
 
@@ -359,195 +348,17 @@ carry `usage.cache_read_input_tokens` (with `cache_creation_input_tokens` report
 `apps/ninfer-serve` exits non-zero when the engine becomes unusable so a supervisor
 (`Restart=on-failure`) reloads the model in about 16 s instead of leaving a dead endpoint up.
 
-### Memory, per GPU
-
-Qwen3.8-27B NVFP4, `--tp 2 --devices 0,1 --kv-dtype int8 --kv-capacity auto`, one active request.
-`Resident` is `nvidia-smi` per-process memory, which was flat across every sample of every run --
-a 1M-token prefill does not push residency above the value chosen at load.
-
-| Context | MTP | Weights | Sequence (KV + GDN state) | Workspace | Reserved (load summary) | Resident (`nvidia-smi`) |
-|---:|---|---:|---:|---:|---:|---:|
-| 262,144 | off | 10.08 GiB | 4.28 GiB | 0.18 GiB | — | **15.04 GiB** |
-| 262,144 | MTP3 | 10.46 GiB | 4.54 GiB | 0.19 GiB | — | **15.69 GiB** |
-| 1,048,576 | off | 10.08 GiB | 16.66 GiB | 182.81 MiB | 26.93 GiB | **27.41 GiB** |
-| 1,048,576 | MTP3 | 10.46 GiB | 17.69 GiB | 192.93 MiB | 28.42 GiB | **28.84 GiB** |
-
-The KV pool is 16.5 KiB per token per device at INT8 group-64, quantization-scale planes included,
-which is the 16.50 GiB pool at 1,048,576 tokens.
-Turning MTP3 on costs a **measured 1.49 GiB of reserved memory per device at 1M and 0.65 GiB at
-262k** -- it is not a constant. Its two dominant terms are **0.38 GiB of head weights**, fixed at
-any window, and **1.03 GiB of MTP KV per 1M tokens of window**; the remainder of each measured
-delta is workspace and sequence-arena rounding. The KV term is one full extra attention layer's
-worth of KV over the window -- one sixteenth of the text pool -- which is what a one-layer MTP head
-costs. The 262,144-token rows were measured through `ninfer-serve`'s startup record and
-`nvidia-smi`, which is why they carry no CLI load-summary `reserved` row.
-
-At 1M with MTP3 the headroom to a 30 GiB per-device budget is **1.16 GiB**, the tightest shipped
-configuration. For comparison, the same artifact at `--tp 1` needs 27.9 GiB on one card for a
-252,928-token window with MTP off and 29.16 GiB with MTP3, and cannot reach 262,144 at all.
-
-### Measured performance
-
-**Every figure carries a per-GPU power limit.** The campaign was measured at a **400 W** cap (the
-minimum settable limit on these cards); the publishable set was then re-measured with both cards at
-**575 W** (vendor defaults are 600 W and 575 W; maximum 600 W). Do not quote any figure below
-without its power condition.
-
-Single request, INT8 KV, CUDA Graphs on, greedy decoding, byte-identical prompt on both widths:
-
-| Workload | TP1 @400 W | TP2 @400 W | TP1 @575 W | TP2 @575 W |
-|---|---:|---:|---:|---:|
-| 249,955-token prompt, MTP off — prefill | 2,269.8 | **2,680.1** | 2,484.2 | **2,787.0 tok/s** |
-| 249,955-token prompt, MTP off — decode | 52.35 | **75.18** | 53.95 | **75.32 tok/s** (1.40x) |
-| 249,955-token prompt, MTP3 — decode | 101.7 | **152.1** | 113.60 | **159.39 tok/s** |
-| 249,955-token prompt, MTP3 — draft acceptance | 50.83% | **57.96%** | 50.83% | **57.96%** |
-| 249,955-token prompt — time to first token | 111.0 s | **93.7 s** | 101.0 s | **90.0 s** |
-| 536-token reasoning prompt, MTP3 — decode | 152.0 | **189.5** | — | — |
-| 652,955-token prompt, MTP off — prefill / decode | does not fit | **1,348.4 / 58.22** | does not fit | not re-measured |
-| 1,045,954-token prompt, MTP off — prefill / decode | does not fit | **928.9 / 46.39** | does not fit | **975.1 / 48.08** |
-| 1,045,954-token prompt, MTP3 — decode (512 tokens) | does not fit | — | does not fit | **100.54 tok/s** at 56.41% |
-
-Lifting the cap helps TP1 more than TP2, and the reason is visible in sampled draw: one card running
-the whole model saturates its limit (peak 575.5 W), while two cards sharing it peak at 391 and
-406 W. The TP2-over-TP1 decode advantage therefore narrows from **1.44x at 400 W to 1.40x at
-575 W** -- TP2 is still faster, and it gets there inside a much smaller power envelope.
-
-At 575 W the 1,045,954-token prefill takes **17.9 minutes** per request, against 18.8 at the 400 W
-cap. Decode degrades smoothly with context rather than falling off a cliff: at the 400 W cap,
-97.9 tok/s at 8k, 58.2 at 653k and 46.4 at 1,046k; the 1,046k point rises to 48.1 at 575 W. Only
-the 250k and 1,046k tiers were re-measured at 575 W. At long context TP2 is *faster* than TP1, not
-merely larger, because per-card weight and KV traffic halve while the cross-device collectives cost
-about 0.2 ms per token under CUDA Graphs.
-
-Saturated concurrent decode at a 262,144-token window, `--tp 2`, aggregate committed tok/s:
-
-| Concurrency | MTP off @400 W | MTP3 @400 W | MTP off @575 W | MTP3 @575 W |
-|---:|---:|---:|---:|---:|
-| 1 | 93.5 | 172.4 | 94.1 | 177.8 |
-| 2 | 183.0 | 287.0 | — | — |
-| 4 | **314.3** (3.36x) | **466.0** (2.70x) | **320.3** (3.40x) | **475.2** (2.67x) |
-
-Per-GPU residency stayed at or below 15.64 GiB at C=4.
-
-### Compared with vLLM
-
-On byte-identical 250k / 653k / 700k-token prompts with **both cards capped at 500 W** -- a third
-power condition, not comparable with the 400 W and 575 W rows above -- vLLM 0.25.1 (TP2, FP8 KV,
-YaRN through `--hf-overrides`, MTP3) prefills **1.17-1.32x faster**, while NInfer decodes **1.41x
-faster at 250k and 2.5-2.8x faster at 653k and 700k**, because vLLM's MTP acceptance is exactly
-**0%** past its native 262,144-token window where NInfer's stays at 51-60%. NInfer also holds a
-**38% larger window in less memory**: 1,048,576 tokens at 27.41 GiB per GPU against vLLM's 759,297
-at 28.90 GiB. At a 512-token answer the request is almost all prefill, so vLLM finishes first at
-every tier; NInfer wins beyond roughly 4,800 / 7,600 / 8,800 output tokens. The two engines ran
-different NVFP4 quantizations of different fine-tunes and different KV dtypes, and no quality claim
-is made -- the full table, method and caveats are in
-[Performance](docs/performance.md#cross-engine-comparison-against-vllm-nvfp4-500-w-per-gpu).
-
-### Retrieval
-
-Needle-in-a-haystack, five depths (10/30/50/70/90%) x two independent haystacks, rule-scored exact
-match, thinking disabled, greedy:
-
-| Engine and configuration | Haystack | Prompt tokens | Retrieved |
-|---|---|---:|:-:|
-| NInfer TP2, native rope | 262k, **tiled** corpus | 259,954 | **10 / 10** |
-| NInfer TP2 + YaRN x4 | 653k, distinct text | 652,954-652,955 | **10 / 10** |
-| NInfer TP2 + YaRN x4 | **1,046k, distinct text** | 1,045,954-1,045,955 | **10 / 10** |
-| vLLM control (model ceiling) | 653k, distinct text | 652,954-652,955 | **10 / 10** |
-
-Three qualifications travel with that table:
-
-- **The 262k row uses a tiled haystack.** The stock corpus is 2.7 MB (644 KB of English essays plus
-  a Chinese novel), so any English tier past roughly 150k tokens repeats the corpus -- at 262k each
-  window occurs about twice. Retrieval stays valid because the needle is unique, but it is an
-  easier task than the 653k and 1,046k rows, whose haystacks are purpose-built distinct text with
-  200 of 200 sampled windows occurring exactly once.
-- **The vLLM control is a different checkpoint** (`orcarouter/Qwen3.8-27B-Uncensored-FP8`, FP8
-  weights, FP8 KV, speculation on) against NInfer's NVFP4 conversion of a different fine-tune. The
-  two rows share a model family and a YaRN configuration, not weights. The row establishes the
-  model-side retrieval ceiling under this YaRN configuration; it is not an engine-versus-engine
-  comparison.
-- **10/10 is not a demonstration of a high per-depth rate.** The 1M grid ran two samples per depth;
-  for 10 successes in 10 trials the exact one-sided 95% Clopper-Pearson lower bound is 74%.
-- **A needle just past 262k does not by itself prove YaRN works.** With the YaRN descriptors
-  nulled, a 270k needle still resolved -- the model tolerates roughly 10% extrapolation past its
-  trained ceiling unaided. The >262k legs of the real-weights YaRN test therefore establish
-  *position addressability*, not YaRN quality. The 653k and 1,046k retrieval rows are what
-  demonstrate YaRN's value, being at genuine multiples of the native window.
-
-Retrieval, not recall: with an invented needle -- an invented place and an invented activity that
-cannot be in any training set -- substituted at depth 50 of a 1,045,956-token prompt, the model
-reproduced the sentence verbatim.
-
-### Soak
-
-All timings in this subsection were taken at the 400 W per-GPU cap (see
-[Measured performance](#measured-performance) above); the soak was not re-run at 575 W.
-
-Two consecutive passes decoded from a 949,885-token prompt to the exact 1,048,576-token ceiling:
-98,692 generated tokens each, `finish reason context-capacity`, 52 minutes of wall clock per pass,
-prefill 1,011.89 and 1,009.97 tok/s, decode 45.49 and 45.39 tok/s, per-device residency flat at
-28,070 MiB (span 4 MiB), and the two passes' 98,692-token id streams and 380,672-byte reply texts
-hash identically. No OOM, no NaN: ten logit-sanity windows sampled every 10k tokens kept top-1
-share at 6.43-6.60% with no out-of-domain ids.
-
-Greedy decoding degenerates on this prompt at this context length, by two distinct mechanisms, and
-the soak stream is therefore stability and determinism evidence rather than a sample of 1M-context
-generation quality. Without a speculative backend and with `--ignore-eos`, the model finishes an
-answer turn, the suppressed end-of-turn token lets it answer again, and it settles into a
-1,903-token turn cycle repeated 46 times byte for byte. With MTP3 the ~950k greedy stream contains
-no end-of-turn token at all and still collapses, into a 187-token content-level loop whose first
-repeat begins at generated index **1,201** -- that one is plain greedy degeneration, not an
-`--ignore-eos` artifact. Sampled decoding at temperature 0.8 does not loop.
-
-### YaRN reference and drift guard
-
-NInfer's YaRN frequency correction is computed to match vLLM as deployed, including vLLM's
-multimodal rotary path: correction range `(16, 24)` and an `mscale` of 1.13863 applied to `cos`/`sin`
-over the 64 rotary dimensions of each 256-dimension head. The reference values are checked in at
-`tests/core/data/yarn_ref_4x.json` (recorded against vLLM 0.25.1), and
-`ninfer_qwen3_6_yarn_rope_drift_test` regenerates them from the installed vLLM and fails if either
-the numbers or the vLLM version drift. Without a vLLM environment the test skips. To regenerate the
-reference after a deliberate vLLM upgrade:
-
-```bash
-VLLM_LOGGING_LEVEL=WARNING "$NINFER_VLLM_PYTHON" tools/tp2/dump_yarn_ref.py \
-  > tests/core/data/yarn_ref_4x.json
-ctest --test-dir build -R ninfer_qwen3_6_yarn_rope_drift_test --output-on-failure
-```
-
-`NINFER_VLLM_PYTHON` points at the Python interpreter of the vLLM environment; the test falls back
-to a known local path when the variable is unset, and `NINFER_YARN_REF_JSON` overrides the compared
-file.
-
-### Test environment variables
-
-The dual-GPU and YaRN tests are opt-in the same way the rest of the artifact-gated suite is: each
-reads an environment variable, falls back to a local default path, and skips (rather than fails)
-when the resource is not present.
-
-| Variable | Used by | Default |
-|---|---|---|
-| `NINFER_QWEN3_8_27B_NVFP4_WEIGHTS` | the sharded-materialization and TP2 real-Engine CTest routes | `/home/pc/models/ninfer-38/huihui-nvfp4/qwen3_8_27b_nvfp4.ninfer` |
-| `NINFER_VLLM_PYTHON` | `ninfer_qwen3_6_yarn_rope_drift_test`, and `tools/tp2/dump_yarn_ref.py` above | `/home/pc/Projects/vllm/unsloth-nvfp4-env/bin/python` |
-| `NINFER_YARN_REF_JSON` | `ninfer_qwen3_6_yarn_rope_drift_test`, to compare against a scratch reference instead of the committed one | `tests/core/data/yarn_ref_4x.json` |
-
-`scripts/tp1-regression.sh` takes the artifact as its first positional argument instead, and
-`TP1_GPU` selects the physical GPU it runs on.
-
 ### Limitations
 
 - **Vision is `--tp 1` only.** The Vision encoder runs on the primary device against replicated
-  weights and has no split path, so `--tp 2 --vision` is rejected at startup. YaRN is likewise
-  rejected together with `--vision`, because the encoder ropes 2-D image-grid positions.
-- **DFlash is unchanged and is rejected at `--tp 2`.** It remains a 35B-A3B text-only backend, and
-  that target has no tensor-parallel path at all.
-- **No NVLink, and no peer-to-peer on GeForce.** `cudaDeviceCanAccessPeer` reports 0 between two
-  RTX 5090s, so the collectives are host-staged asynchronous copies over PCIe rather than direct
-  peer copies. This is a measured property of the hardware, not a configuration choice. A decode
-  token costs 128 reduces plus one logit all-gather; a 10 KiB reduce measures about 16 us, and
-  under CUDA Graphs the whole collective set costs roughly 0.2 ms per token (both at the 400 W
-  per-GPU cap).
+  weights and has no split path, so `--tp 2 --vision` is rejected at startup.
+- **DFlash is rejected at `--tp 2`.** It remains a 35B-A3B text-only backend, and that target has no
+  tensor-parallel path at all.
+- **Peer access depends on the board.** Upstream measured `cudaDeviceCanAccessPeer` as 0 between two
+  RTX 5090s and stages the collectives as host-staged copies over PCIe rather than direct peer
+  copies; on the two RTX 5060 Ti cards this fork was measured on, it reports 1 in both directions.
+  Either way a decode token costs 128 reduces plus one logit all-gather, and under CUDA Graphs the
+  whole collective set is small next to the ~28 ms per round the weights themselves cost.
 - **MTP prefix reuse works at `--tp 2`, with two known degradations.** This fork implements the
   retained-state resume on the TP2 path, so a request that extends a prefix the engine still holds
   hits (`reuse=restore_turn_checkpoint`) instead of re-prefilling the whole prompt. It still
@@ -558,43 +369,11 @@ when the resource is not present.
 - **MTP is output-equivalent up to near-tie argmax flips, not bit-identical.** A verify round
   evaluates the target model over `K+1` columns at once and an ordinary round over one, which
   selects different GEMM shapes; greedy MTP-on and MTP-off streams can therefore diverge on a
-  near-tie token. Every committed token is still one the target model's own argmax selected. On the
-  1,046k needles the MTP3 and MTP-off answers are identical token for token; on a 949,885-token
-  soak stream they first differ at generated index 45. Measured like for like at 575 W -- same
-  1,045,954-token prompt, same 512-token budget -- MTP3 decodes **2.18x** faster than MTP off.
-- **1,048,576 tokens is a one-slot configuration.** `--max-concurrency` must be 1; concurrency at
-  extended context requires coming down from the ceiling (roughly 500k for two slots at INT8 KV).
+  near-tie token. Every committed token is still one the target model's own argmax selected.
 - **`--ignore-eos` is a diagnostic flag.** It exists for fixed-length soak and throughput work.
   Generation past the end-of-turn token is off-distribution and is not a product output. It is not
-  the only route to a degenerate stream: greedy decoding at this context length also loops on its
-  own content, with the flag off.
-- **A full-ceiling prefill costs about 18 minutes** (17.9 at 575 W, 18.8 at the 400 W cap), and 1M
-  decode runs at roughly 48 tok/s, or 100 tok/s with MTP3. Retrieval is not the binding constraint
-  at 1M; latency is.
-- The decode split policy was tuned at 262k. At 1M it is smooth rather than pathological, but it
-  has not been swept at that length.
-- **A 1M boot can fail on the CUDA Graph allowance, transiently.** One 1,048,576-token
-  `--tp 2` boot aborted at startup with `CUDA Graph preparation consumed 44433408 bytes on device
-  0, exceeding the planned per-device allowance of 20971520 bytes`. The identical command line had
-  booted minutes earlier and booted again on the immediate retry, and successful boots of that same
-  configuration report only 2.00-3.44 MiB of captured graph memory per device, so the 20 MiB
-  per-device allowance is too tight against a capture pool that is not deterministic. The
-  workaround is to retry; the fix is to raise the allowance or size it from a measured reservation.
-  The failing log is kept at
-  `eval/results/cross-engine-nvfp4/ninfer-500w-700000-mtp0-cudagraph-allowance-failure.txt`.
-- **Three power conditions, and every number carries one.** The campaign ran at a **400 W** per-GPU
-  cap, the publishable subset was re-measured at **575 W**, and the cross-engine comparison against
-  vLLM was taken at **500 W**. Never quote a figure without its condition, and never compare figures
-  across conditions.
-- **What is not measured.** Concurrency C=2 was measured only at the 400 W cap, and the 653k tier
-  was not re-measured at 575 W. The soak is greedy only; a seeded temperature > 0 soak has not been
-  run. The cross-engine comparison has no vLLM MTP-off row -- speculative decoding is fixed at
-  vLLM's launch and that restart was not made -- and the prefill-chunk difference behind vLLM's
-  prefill lead (`--prefill-chunk 1024` against `--max-num-batched-tokens 16768`) was not swept on
-  either engine. Independent FP64-oracle conformance for shard extents covers the FP8 A8 row
-  extents only -- the NVFP4, Q4, Q5, W8 and vocabulary shard geometries are qualified pairwise
-  against the `--tp 1` kernel on the whole weight, plus the model-level parity, retrieval and
-  MTP-argmax evidence.
+  the only route to a degenerate stream: greedy decoding at long context also loops on its own
+  content, with the flag off.
 - **A reused prefix can differ from a cold prefill in the last bits.** A cache hit computes its
   suffix from the retained checkpoint frontier instead of from the full-prefill chunk grid, so the
   two runs are not bit-identical and greedy text can occasionally flip. This is the same class of
@@ -604,10 +383,10 @@ when the resource is not present.
 - **`k16v8` cannot reach 262144 tokens in a single slot.** Its BF16 keys cost 26.2 KiB/token, so the
   one-slot ceiling is 253952 with `--prefill-chunk 1024` (and 229376 with `--prefill-chunk 4096`).
 
-This section and [Performance](docs/performance.md) carry the headline figures with their
-reproduction commands. The design decisions behind them -- the collective transport, the shard map,
-the YaRN constants, and what each correctness gate actually proves -- are in
-[Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md).
+The design decisions behind the TP2 path -- the collective transport, the shard map, and what each
+correctness gate actually proves -- are in
+[Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md); that document also
+covers the YaRN extended-position work this fork does not use.
 
 ## Capabilities and limits
 
@@ -650,8 +429,8 @@ Limits.
   tensor-parallel width described above: one process, one resident model, no NVLink, no more than
   two devices.
 - `--max-context` is the logical ceiling of each sequence and is configurable up to the registered
-  models' native 262,144-token limit, or up to 1,048,576 tokens under `--rope yarn` on the 27B
-  targets. `--kv-capacity N` explicitly sizes the shared Main Text KV
+  models' native 262,144-token limit (`--rope yarn` reaches further on the 27B targets, but this fork
+  does not use it; see [Dual-GPU (TP2)](#dual-gpu-tp2)). `--kv-capacity N` explicitly sizes the shared Main Text KV
   pool for all active and retained sequences, while `--kv-capacity auto` selects the largest usable
   capacity from the memory remaining after weights are loaded while preserving 1 GiB of sizing
   headroom. Omission defaults to one `--max-context` worth of pages. The resolved pool is fixed at
