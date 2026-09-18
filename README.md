@@ -109,7 +109,9 @@ profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B — and accepts them;
 this fork is built and measured against, with one measurement worth recording: the official `nvfp4`
 artifact was also run at `--tp 2` here, and it loads and generates normally on 2× RTX 5060 Ti (10.08
 GiB of weights per card, 38 tok/s decode with MTP off). With `int8` KV, a single slot fits that
-artifact's whole 262,144-token native ceiling and still leaves 842 MiB free per card. The W4A4 form
+artifact's whole 262,144-token native ceiling and still leaves 842 MiB free per card — the same
+residual under `ninfer-serve` as under the CLI, because the media and response buffers are not
+reserved while vision is off. The W4A4 form
 is the model this fork wanted to run, not a tensor-parallel requirement. Current builds accept only
 the version-2 container, and all of those are version 2.
 
