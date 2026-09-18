@@ -63,6 +63,13 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
   --src src/W4A4 --verify models/qwen3_8_27b_nvfp4w4a4.ninfer
 ```
 
+The converter reads nine files from `src/W4A4`: the two safetensors shards, `model.safetensors.index.json`,
+and six frontend resources (`tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`,
+`generation_config.json`, `preprocessor_config.json`, `video_preprocessor_config.json`). The six
+frontend resources are copied into the artifact byte-for-byte and the conversion aborts if any is
+missing, so the `W4A4/*` glob above is the right thing to download — it fetches everything the
+converter needs, at roughly 13 MB beyond the two shards.
+
 What the converter does, and what it deliberately does not do:
 
 - it reuses the engine's own encoders. NVFP4 objects are **repacked byte-exactly**, BF16/FP32 objects

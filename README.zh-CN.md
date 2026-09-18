@@ -56,6 +56,11 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
   --src src/W4A4 --verify models/qwen3_8_27b_nvfp4w4a4.ninfer
 ```
 
+转换器从 `src/W4A4` 读 **9 个文件**：两个 safetensors 分片、`model.safetensors.index.json`，以及 6 个前端资源
+（`tokenizer.json`、`tokenizer_config.json`、`chat_template.jinja`、`generation_config.json`、
+`preprocessor_config.json`、`video_preprocessor_config.json`）。那 6 个会被**逐字节**写进产物，缺任何一个
+转换立即中止 —— 所以上面 `W4A4/*` 这条 glob 正是该下的：它把转换器需要的全拉下来，除两个分片外只多约 13 MB。
+
 转换器做了什么、以及刻意不做什么：
 
 - **复用引擎自己的编码器**：NVFP4 对象**逐字节重打包**，BF16/FP32 对象直通，W8/Q4/Q5/Q6 端点、MTP 模块与
@@ -119,6 +124,39 @@ cmake --build build --parallel
 
 环境要求见 [构建要求](#构建要求)，产物转换见
 [`docs/maintainer/qwen3.8-27b-w4a4-artifact.md`](docs/maintainer/qwen3.8-27b-w4a4-artifact.md)。
+
+## 用法
+
+**CLI**（双卡单次提问）：
+
+```bash
+./build/apps/ninfer models/qwen3_8_27b_nvfp4w4a4.ninfer \
+  --tp 2 --devices 0,1 \
+  --kv-dtype k16v8 --max-context 32768 --kv-capacity 32768 \
+  --spec mtp --draft-tokens 3 --lm-head-draft \
+  --prompt "用一句话说明潮汐的成因。" --max-new 256
+```
+
+多轮对话或带图/视频时改用 `--messages FILE`（JSON 结构见 [CLI 示例](examples/cli/)）；`--no-thinking`
+能让较小的 `--max-new` 预算直接进答案通道 —— 这个 checkpoint 默认的思考模式会把短预算全吃在推理流里。
+答案写 stdout，加载进度、计时、吞吐、显存与投机解码统计写 stderr。
+
+**HTTP 服务**（OpenAI / Anthropic 兼容，命令见[快速开始](#快速开始)）：
+
+```bash
+curl http://127.0.0.1:8815/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.8-27b-w4a4-mtp3",
+    "messages": [{"role": "user", "content": "用一句话说明潮汐的成因。"}],
+    "max_tokens": 64
+  }'
+```
+
+服务同时实现 OpenAI Responses Core、OpenAI Chat Completions 与 Anthropic Messages（含流式、token 计数与
+usage 计量），以及由 prompt 渲染的函数工具；`/health` 报告引擎可用性。`model` 字段默认等于产物的
+`identity.model_id`，只有要发布部署专属别名时才需要 `--model-id`。详见 [CLI](docs/cli.md) 与
+[HTTP 服务](docs/serving.md)。
 
 ## KV cache 档位与长上下文上限
 
