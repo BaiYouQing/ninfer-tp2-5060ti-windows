@@ -56,6 +56,10 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
   --src src/W4A4 --verify models/qwen3_8_27b_nvfp4w4a4.ninfer
 ```
 
+`huggingface.co` 在部分网络下不可达。`huggingface_hub` 认 `HF_ENDPOINT` 环境变量，所以
+`HF_ENDPOINT=https://hf-mirror.com hf download …` 可以经镜像取到同样的文件 —— 本 fork 最近一次复现这三步时
+就是这么下的。
+
 转换器从 `src/W4A4` 读 **9 个文件**：两个 safetensors 分片、`model.safetensors.index.json`，以及 6 个前端资源
 （`tokenizer.json`、`tokenizer_config.json`、`chat_template.jinja`、`generation_config.json`、
 `preprocessor_config.json`、`video_preprocessor_config.json`）。那 6 个会被**逐字节**写进产物，缺任何一个

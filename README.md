@@ -63,6 +63,10 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
   --src src/W4A4 --verify models/qwen3_8_27b_nvfp4w4a4.ninfer
 ```
 
+`huggingface.co` is not reachable from every network. `huggingface_hub` honours the `HF_ENDPOINT`
+environment variable, so `HF_ENDPOINT=https://hf-mirror.com hf download …` fetches the same files
+through a mirror — that is how these steps were run when this fork's conversion was last reproduced.
+
 The converter reads nine files from `src/W4A4`: the two safetensors shards, `model.safetensors.index.json`,
 and six frontend resources (`tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`,
 `generation_config.json`, `preprocessor_config.json`, `video_preprocessor_config.json`). The six
