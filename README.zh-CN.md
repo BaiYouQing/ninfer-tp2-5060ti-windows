@@ -28,8 +28,33 @@ OpenAI / Anthropic 兼容的 HTTP 接口处理文本、图像与视频输入；�
 
 ## 权重
 
-本 fork 只跑一个模型：**Qwen3.8-27B NVFP4 W4A4**。`.ninfer` 产物不由本仓分发 —— 用仓内转换器从公开的
-源权重自行构建。
+本 fork 跑的是 **Qwen3.8-27B NVFP4** 的两种可互换形态。两者都在这里于 **2× RTX 5060 Ti** 上以 `--tp 2`
+实测过；两者都装不进单块 16 GiB 卡。
+
+| | 官方版（上游的） | 本 fork 的 W4A4 |
+|---|---|---|
+| 产物 | `qwen3_8_27b_nvfp4.ninfer` | `qwen3_8_27b_nvfp4w4a4.ninfer` |
+| 体积 | 21,492,695,040 B（20.02 GiB） | 17,555,334,916 B（16.35 GiB） |
+| `--tp 2` 下每卡权重 | 10.08 GiB | 8.66 GiB |
+| 量化 | MLP 走 NVFP4，其余走行标度 FP8 | 全程 NVFP4，含 4 bit 激活 |
+| `int8` KV + MTP3 下的 decode | 76–86 tok/s | 106.5 tok/s |
+| `int8` KV 下的单槽 | 262144（该产物的原生上限） | 262144 |
+| SHA-256 | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` | `63c204d223e73d63d6d4db8a82aa3f4859592cd83b00545bcee38334643341cb` |
+
+官方版一次下载、无需转换；W4A4 版每卡权重少 16%、同一 KV 档下 decode 快约 24%。本 README 其余内容对两者
+同样适用 —— 唯一区别是命令行上写的产物路径。
+
+拿官方版：
+
+```bash
+hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
+  qwen3_8_27b_nvfp4.ninfer \
+  --local-dir models
+```
+
+### W4A4 的源
+
+`.ninfer` 产物不由本仓分发 —— 用仓内转换器从公开的源权重自行构建。
 
 | 项 | 值 |
 |---|---|
@@ -89,17 +114,11 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
 
 ### 引擎还注册了哪些产物
 
-NInfer 刻意只支持一组封闭的产物、不做通用模型运行时。引擎另外注册并接受上游的 identity —— 官方
-[`Qwen3.8-27B NVFP4`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) 产物
-（`qwen3_8_27b_nvfp4.ninfer`，21,492,695,040 B，SHA-256
-`bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`）、Qwen3.6-27B 两个档、
-Qwen3.8-27B 的 `groupwise-int`、Qwen3.6-35B-A3B —— 只是它们不在本 fork 的构建与实测范围内。有一条实测
-值得记下来：**官方 `nvfp4` 产物也在这里的 `--tp 2` 下跑过**，在 2× RTX 5060 Ti 上加载与生成都正常
-（每卡权重 10.08 GiB；未开 MTP 时 decode 38 tok/s，开 `--spec mtp --draft-tokens 3 --lm-head-draft`
-时 76–86 tok/s）；用 `int8` KV 时**单槽能吃满它 262,144 token 的原生上限**，
-每卡还余 842 MiB —— `ninfer-serve` 与 CLI 的余量**完全一样**，因为视觉关闭时媒体与响应缓冲并不预留。
-W4A4 形态每卡权重少 16%，同一 `int8` 档下 decode 是 106 tok/s。⇒ 上面的 W4A4 形态是本 fork 想跑的模型，**不是张量并行的硬要求**。当前构建只接受
-version-2 容器，上面这些也都是 version 2。
+NInfer 刻意只支持一组封闭的产物、不做通用模型运行时。除上面那两种形态之外，引擎还注册并接受上游的
+identity —— Qwen3.6-27B 两个档、Qwen3.8-27B 的 `groupwise-int`、Qwen3.6-35B-A3B —— 它们不在本 fork 的
+构建与实测范围内。一条与官方版相关的容量备注：它在 262,144 token 的 `int8` 单槽下每卡仍余 842 MiB ——
+`ninfer-serve` 与 CLI 的余量**完全一样**，因为视觉关闭时媒体与响应缓冲并不预留。当前构建只接受 version-2
+容器，上面这些也都是 version 2。
 
 每个 `.ninfer` 文件里含 NInfer 需要的全部权重与前端资源，它不是 Transformers checkpoint、不是 Safetensors
 分发、也不是 GGUF。产物本身完整，而 GPU 常驻在进程启动时就已固定：**投机解码默认关闭**（MTP/DFlash 状态
@@ -120,7 +139,8 @@ cmake --build build --parallel
 ```
 
 在双卡上以 K16V8 KV cache 起 27B 的 NVFP4 W4A4 产物（253,952 token 单槽，MTP3 投机解码 + 优化草稿头）。
-这个产物不由本仓分发 —— 先按上面的 [权重](#权重) 把它转出来并放进 `models/`：
+W4A4 那份要先按[权重](#权重)转出来放进 `models/`；要用官方版就把这里的路径换掉（它用 `int8` KV 时能吃满
+262,144 token 的单槽）：
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \

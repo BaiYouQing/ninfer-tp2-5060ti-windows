@@ -31,8 +31,35 @@ measures is in the fork note.
 
 ## The weights
 
-This fork runs one model: **Qwen3.8-27B NVFP4 W4A4**. The `.ninfer` artifact is not distributed here;
-build it from the published source with the in-tree converter.
+This fork runs **Qwen3.8-27B NVFP4** in two interchangeable forms. Both were measured here at
+`--tp 2` on 2× RTX 5060 Ti; neither fits on a single 16 GiB card.
+
+| | official — upstream's | this fork's W4A4 |
+|---|---|---|
+| artifact | `qwen3_8_27b_nvfp4.ninfer` | `qwen3_8_27b_nvfp4w4a4.ninfer` |
+| size | 21,492,695,040 B (20.02 GiB) | 17,555,334,916 B (16.35 GiB) |
+| weights per card at `--tp 2` | 10.08 GiB | 8.66 GiB |
+| quantization | NVFP4 MLP plus row-scaled FP8 elsewhere | NVFP4 throughout, including 4-bit activations |
+| decode at `int8` KV, MTP3 | 76–86 tok/s | 106.5 tok/s |
+| single slot at `int8` KV | 262144 (that artifact's native ceiling) | 262144 |
+| SHA-256 | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` | `63c204d223e73d63d6d4db8a82aa3f4859592cd83b00545bcee38334643341cb` |
+
+The official form is one download with nothing to convert; the W4A4 form carries 16% less weight per
+card and decodes about 24% faster on the same KV tier. Everything else in this README applies to both
+— the only difference is the artifact path on the command line.
+
+Get the official artifact:
+
+```bash
+hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
+  qwen3_8_27b_nvfp4.ninfer \
+  --local-dir models
+```
+
+### The W4A4 source
+
+The `.ninfer` artifact is not distributed here; build it from the published source with the in-tree
+converter.
 
 | | |
 |---|---|
@@ -42,7 +69,7 @@ build it from the published source with the in-tree converter.
 | Converter | [`tools/convert/qwen3_8_27b/convert_w4a4.py`](tools/convert/qwen3_8_27b/convert_w4a4.py) |
 | Result | `qwen3_8_27b_nvfp4w4a4.ninfer`, 17,555,334,916 bytes (16.35 GiB), SHA-256 `63c204d223e73d63d6d4db8a82aa3f4859592cd83b00545bcee38334643341cb` |
 
-### How the artifact is built
+### How the W4A4 artifact is built
 
 ```bash
 # 1. the W4A4 subdirectory of the published checkpoint
@@ -101,21 +128,12 @@ ships (same SHA-256 as the table above). The full page is
 ### Other registered artifacts
 
 NInfer deliberately supports a closed set of artifacts rather than acting as a general model runtime.
-The engine also registers upstream's identities — the official
-[`Qwen3.8-27B NVFP4`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) artifact
-(`qwen3_8_27b_nvfp4.ninfer`, 21,492,695,040 bytes, SHA-256
-`bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`), Qwen3.6-27B in both weight
-profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B — and accepts them; they are outside what
-this fork is built and measured against, with one measurement worth recording: the official `nvfp4`
-artifact was also run at `--tp 2` here, and it loads and generates normally on 2× RTX 5060 Ti (10.08
-GiB of weights per card; 38 tok/s decode with MTP off, and 76–86 tok/s with `--spec mtp
---draft-tokens 3 --lm-head-draft`). The W4A4 form carries 16% less weight per card and decodes at
-106 tok/s on the same `int8` tier. With `int8` KV, a single slot fits that
-artifact's whole 262,144-token native ceiling and still leaves 842 MiB free per card — the same
-residual under `ninfer-serve` as under the CLI, because the media and response buffers are not
-reserved while vision is off. The W4A4 form
-is the model this fork wanted to run, not a tensor-parallel requirement. Current builds accept only
-the version-2 container, and all of those are version 2.
+Beyond the two forms above, the engine also registers upstream's identities — Qwen3.6-27B in both
+weight profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B — and accepts them; they are outside
+what this fork is built and measured against. One sizing note on the official form: at its full
+262,144-token `int8` slot it leaves 842 MiB free per card — the same residual under `ninfer-serve` as
+under the CLI, because the media and response buffers are not reserved while vision is off. Current
+builds accept only the version-2 container, and all of those are version 2.
 
 Every `.ninfer` file contains the weights and frontend resources NInfer needs. It is not a
 Transformers checkpoint, Safetensors distribution, or GGUF file. Each artifact is complete, while GPU
@@ -137,8 +155,9 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-Serve the artifact built in [The weights](#the-weights) on two GPUs with the K16V8 KV cache
-(253,952-token single slot, MTP3 speculative decoding with the optimized draft head):
+Serve the W4A4 artifact from [The weights](#the-weights) on two GPUs with the K16V8 KV cache
+(253,952-token single slot, MTP3 speculative decoding with the optimized draft head). To use the
+official artifact instead, swap the path — with `int8` KV it fits a full 262,144-token slot:
 
 ```bash
 ./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4w4a4.ninfer \
