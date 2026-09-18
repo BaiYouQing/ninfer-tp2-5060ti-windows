@@ -27,19 +27,22 @@ NVIDIA GeForce RTX 5090，通过本地 CLI 或 OpenAI / Anthropic 兼容的 HTTP
 > 与协议面均未改变。设计决策与验证证据见
 > [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md)，署名见 [NOTICE](NOTICE)。
 
-NInfer 刻意只支持一组封闭的模型产物，而不是做一个通用模型运行时：
+NInfer 刻意只支持一组封闭的模型产物，而不是做一个通用模型运行时。本 fork 只用 **Qwen3.8-27B NVFP4**
+这一种模型形态，两个版本：
 
 | 模型 | 权重档 | NInfer 产物 | 大小 | SHA-256 |
 |---|---|---|---:|---|
-| [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `groupwise-int` | `qwen3_6_27b.ninfer` | 17,495,365,888 B（16.29 GiB） | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
-| [Qwen3.6-27B NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` | **18,324,064,000 B（17.07 GiB）** | `bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a` |
-| [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `groupwise-int` | `qwen3_8_27b.ninfer` | 18,210,531,328 B（16.96 GiB） | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | **21,492,695,040 B（20.02 GiB）** | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
-| [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | 22,783,246,080 B（21.22 GiB） | `1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2` |
+| [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer)（上游官方版） | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 B（20.02 GiB） | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
+| Qwen3.8-27B NVFP4 **W4A4**（本 fork 用版，本 README 所有 TP2 数据都是它测的） | `nvfp4-w4a4` | `qwen3_8_27b_nvfp4w4a4.ninfer` | 17,555,334,916 B（16.35 GiB） | 不分发 —— 见[下载模型](#下载模型) |
 
-Qwen3.6-27B 与 Qwen3.8-27B 各有两个注册权重档。version-2 产物 identity 会自己决定用哪个档，不需要额外的
-运行时开关。Qwen3.8-27B 的 `nvfp4` 档是**混合**量化：Text 0–55 层的 MLP 用 NVFP4，token embedding、
-attention 输入/输出投影、GDN 的 Q/K/V/Z 与输出投影、output head 以及其余 MLP 权重用行标度 FP8。
+上游那版 `nvfp4` 是**混合**量化：Text 0–55 层的 MLP 用 NVFP4，token embedding、attention 输入/输出投影、
+GDN 的 Q/K/V/Z 与输出投影、output head 以及其余 MLP 权重用行标度 FP8。它**不能用于 `--tp 2`** ——
+它的 BF16 例外层过不了列并行的融合权重绑定。**W4A4** 版才是 TP2 可用形态：线性层全程 NVFP4、激活也是
+4 bit，这也是它体积更小的原因。
+
+引擎另外还注册并接受上游的其余 identity（Qwen3.6-27B 两个档、Qwen3.8-27B 的 `groupwise-int`、
+Qwen3.6-35B-A3B）；它们不在本 fork 的构建与实测范围内。所有已注册产物的 Text、Vision、MTP、
+前缀复用、CLI 与 serving 路径都相同。
 
 ## 快速开始
 
@@ -69,7 +72,7 @@ cmake --build build --parallel
 
 ## 下载模型
 
-注册的产物用 Hugging Face CLI 下载（上游已发布的五个 identity 本仓同样支持）：
+上游官方那版用 Hugging Face CLI 下载（引擎另外也注册并接受其他上游 identity，但不在本 README 的覆盖范围）：
 
 ```bash
 hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
@@ -82,17 +85,11 @@ Safetensors 分发、也不是 GGUF。另外，**投机解码默认关闭**（MT
 （权重、Vision scratch 与 request-transient 分配都不占）；要接受图像/视频输入就在 CLI 或服务进程上加
 `--vision`。
 
-### 本 fork 验证用的 W4A4 产物
+### W4A4 产物的来源与转换方法
 
-本 README 里的 TP2 数据，以及本 fork 新增的 KV 档位、前缀复用与 `/health` 工作，都是在下面这个
-**Qwen3.8-27B NVFP4 W4A4** 产物上测的，本仓同样不分发它：
-
-| 产物 | 来源 | 获取方式 |
-|---|---|---|
-| `qwen3_8_27b_nvfp4w4a4.ninfer`（NVFP4 **W4A4**；权重 4 bit、激活也 4 bit；**16.35 GiB**） | ModelScope 上的合并微调模型 `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4`（W4A4 版），ModelOpt NVFP4 量化、group size 16 | **本仓不分发**：用 `tools/convert/qwen3_8_27b/convert_w4a4.py` 自行转换；源布局、完整命令与验证门槛见 [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md) |
-
-本 fork 的 TP2 路径有一条专属注意：上游那个 `qwen3.8-27b/nvfp4` 产物**没有**在 `--tp 2` 上验证过
-（它的 BF16 例外层过不了列并行的融合权重绑定），所以要用上面这个 W4A4 形态。
+| 来源（ModelScope） | 转换方法 |
+|---|---|
+| 合并微调模型 `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4`（W4A4 版），ModelOpt NVFP4 量化、group size 16 | 本仓不分发产物：用 `tools/convert/qwen3_8_27b/convert_w4a4.py` 自行转换；源布局、完整命令与验证门槛见 [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md) |
 
 ## KV cache 档位与长上下文上限
 
@@ -197,7 +194,7 @@ build/apps/ninfer-serve
 
 **限制。**
 
-- 只接受上面列出的五个 `(model_id, weights_id)` 产物 identity；
+- 只接受注册的五个 `(model_id, weights_id)` 产物 identity（上表覆盖其中两个）；
 - 执行专门面向 RTX 5090。默认一个 CUDA 设备；27B 执行包也支持正好两个（`--tp 2 --devices A,B`），
   这是容量特性而不是横向扩展。本 fork 增加了 2× RTX 5060 Ti（16 GiB）上的实测；构建目标两边都是 `sm_120a`；
 - 一个 Engine 持有一份常驻模型，启动时固定 1–8 个并发请求容量；decode-ready 的请求在轮边界被压缩进一次

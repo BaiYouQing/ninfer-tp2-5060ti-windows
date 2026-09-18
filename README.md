@@ -64,24 +64,25 @@ in `models/`:
 artifact conversion and the complete option set.
 
 NInfer deliberately supports a closed set of model artifacts instead of acting as a general model
-runtime:
+runtime. This fork is built and measured against the **Qwen3.8-27B NVFP4** form of the model, in two
+variants:
 
 | Model | Weights | NInfer artifact | Size | SHA-256 |
 |---|---|---|---:|---|
-| [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `groupwise-int` | `qwen3_6_27b.ninfer` | 17,495,365,888 bytes (16.29 GiB) | `7b51600ffd10632b9660f56085efdd9b751d79733ad32036a652234b64bebe7b` |
-| [Qwen3.6-27B NVFP4](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_6_27b_nvfp4.ninfer` | 18,324,064,000 bytes (17.07 GiB) | `bce5f00d066c0f20f1317bf1fdcb458264cf95837c3b1f3fbec163694627893a` |
-| [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `groupwise-int` | `qwen3_8_27b.ninfer` | 18,210,531,328 bytes (16.96 GiB) | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 bytes (20.02 GiB) | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
-| [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `groupwise-int` | `qwen3_6_35b_a3b.ninfer` | 22,783,246,080 bytes (21.22 GiB) | `1fb9ea0b5b8561e49d9604115ec89e5d9f2b6f6434e32c37c57fffd480a325d2` |
+| [Qwen3.8-27B NVFP4](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) — upstream's | `nvfp4` | `qwen3_8_27b_nvfp4.ninfer` | 21,492,695,040 bytes (20.02 GiB) | `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32` |
+| Qwen3.8-27B NVFP4 **W4A4** — this fork's, the artifact every TP2 number here was measured on | `nvfp4-w4a4` | `qwen3_8_27b_nvfp4w4a4.ninfer` | 17,555,334,916 bytes (16.35 GiB) | not distributed — see [Download a model](#download-a-model) |
 
-Qwen3.6-27B and Qwen3.8-27B each expose two registered weight profiles. The version-2 artifact
-identity selects the profile without a separate runtime flag; Qwen3.8 uses target key
-`qwen3_8_27b` while sharing the 27B execution package. The Qwen3.6 `nvfp4` profile uses W4A4 Tensor
-Core MMA for prefill and A16 NVFP4 kernels for decode. The Qwen3.8 `nvfp4` profile preserves its
-source's mixed allocation: NVFP4 MLP weights in Text layers 0–55 and row-scaled FP8 for the token
-embedding, attention input/output projections, GDN Q/K/V/Z and output projections, output head, and
-remaining MLP weights. All four 27B artifacts retain the same Text, Vision, MTP, prefix-reuse, CLI,
-and serving routes.
+The upstream `nvfp4` profile preserves its source's mixed allocation: NVFP4 MLP weights in Text
+layers 0–55, and row-scaled FP8 for the token embedding, attention input/output projections, GDN
+Q/K/V/Z and output projections, output head, and the remaining MLP weights. It is **not** usable at
+`--tp 2` — its BF16 exception layers fail the column-parallel fused-weight bind. The **W4A4** variant
+is the TP2-compatible form: its linear layers are NVFP4 with 4-bit activations throughout, which is
+also why it is the smaller of the two.
+
+The engine additionally registers the other upstream identities (Qwen3.6-27B in both weight
+profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B) and accepts them; they are outside what
+this fork is built and measured against. All registered artifacts retain the same Text, Vision, MTP,
+prefix-reuse, CLI, and serving routes.
 
 ## Performance
 
@@ -231,7 +232,7 @@ docker run --rm \
   --publish 8080:8080 \
   --volume "$PWD/models:/models:ro" \
   ninfer:local \
-  ninfer-serve /models/qwen3_6_27b.ninfer \
+  ninfer-serve /models/qwen3_8_27b_nvfp4.ninfer \
   --host 0.0.0.0
 ```
 
@@ -242,53 +243,25 @@ docker run --rm \
   --gpus '"device=0"' \
   --volume "$PWD/models:/models:ro" \
   ninfer:local \
-  ninfer /models/qwen3_6_27b.ninfer \
+  ninfer /models/qwen3_8_27b_nvfp4.ninfer \
   --prompt "Explain prefill and decode in three sentences." \
   --max-new 256
 ```
 
 ## Download a model
 
-Use the Hugging Face CLI to download one of the registered artifacts:
+Download the upstream Qwen3.8-27B NVFP4 artifact with the Hugging Face CLI:
 
 ```bash
-hf download neroued/Qwen3.6-27B-NInfer \
-  qwen3_6_27b.ninfer \
-  --local-dir models
-
-# Or the 27B NVFP4 weight variant:
-hf download neroued/Qwen3.6-27B-nvfp4-NInfer \
-  qwen3_6_27b_nvfp4.ninfer \
-  --local-dir models
-
-# Or Qwen3.8-27B:
-hf download neroued/Qwen3.8-27B-NInfer \
-  qwen3_8_27b.ninfer \
-  --local-dir models
-
-# Or Qwen3.8-27B NVFP4:
 hf download neroued/Qwen3.8-27B-nvfp4-NInfer \
   qwen3_8_27b_nvfp4.ninfer \
   --local-dir models
-
-# Or:
-hf download neroued/Qwen3.6-35B-A3B-NInfer \
-  qwen3_6_35b_a3b.ninfer \
-  --local-dir models
 ```
 
-Current NInfer builds accept only the version-2 artifact container, and all five downloads above
-are version 2. Migration applies only to Qwen3.6 artifacts downloaded before their version-2
-publication; both Qwen3.8-27B profiles were published directly as version 2. Migrate an older exact
-local file in place:
-
-```bash
-python3 -m tools.artifact.migrate_v1_to_v2 models/qwen3_6_27b.ninfer
-```
-
-Use the same command with `qwen3_6_27b_nvfp4.ninfer` or `qwen3_6_35b_a3b.ninfer` for those
-artifacts. The migration updates only container metadata; it does not rewrite the weight payload.
-Alternatively, download the current version-2 file again from its Hugging Face repository.
+Current NInfer builds accept only the version-2 artifact container, and that file is version 2.
+The other registered identities download the same way from their `neroued/*` repositories; the one
+migration path (`python3 -m tools.artifact.migrate_v1_to_v2 <file>`) applies only to Qwen3.6
+artifacts published before their version-2 update, which this README does not cover.
 
 Each `.ninfer` file contains the weights and frontend resources needed by NInfer. It is not a
 Transformers checkpoint, Safetensors distribution, or GGUF file.
@@ -309,15 +282,13 @@ fork, were taken on a **Qwen3.8-27B NVFP4 W4A4** artifact that this repository d
 |---|---|---|
 | `qwen3_8_27b_nvfp4w4a4.ninfer` (NVFP4 **W4A4**; 4-bit weights *and* 4-bit activations) | a merged Qwen3.8-27B fine-tune published on ModelScope as `Merkyor/Qwen3.8-27B-EfficientThink-K3-Opus5-Grok4.6-GPT5.6Sol-SFT-SimPO-MTP-NVFP4` (the W4A4 variant), quantized with ModelOpt NVFP4, group size 16 | **Not distributed here.** Convert it yourself with `tools/convert/qwen3_8_27b/convert_w4a4.py`; the source layout, the exact command and the verification gate are in [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md) |
 
-The five upstream artifacts above remain supported. One caveat specific to this fork's TP2 path:
-the upstream `qwen3.8-27b/nvfp4` artifact is **not** validated on `--tp 2` -- its BF16 exception
-layers fail the column-parallel fused-weight bind -- so the W4A4 form above is the TP2 artifact to
-use.
+The W4A4 form is the one to use at `--tp 2`: the upstream `nvfp4` artifact's BF16 exception layers
+fail the column-parallel fused-weight bind.
 
 ## Run the CLI
 
 ```bash
-./build/apps/ninfer models/qwen3_6_27b.ninfer \
+./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer \
   --prompt "Explain prefill and decode in three sentences." \
   --max-context 16384 \
   --max-new 256 \
@@ -328,7 +299,7 @@ use.
 Use `--messages FILE` instead of `--prompt` for chat history, images, or videos:
 
 ```bash
-./build/apps/ninfer models/qwen3_6_27b.ninfer \
+./build/apps/ninfer models/qwen3_8_27b_nvfp4.ninfer \
   --messages examples/cli/messages/image_chart.json \
   --max-context 8192 \
   --max-new 128 \
@@ -342,7 +313,7 @@ speculative-decoding statistics are written to stderr. See the [CLI guide](docs/
 ## Run the HTTP server
 
 ```bash
-./build/apps/ninfer-serve models/qwen3_6_27b.ninfer \
+./build/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
   --max-context 16384 \
   --kv-capacity auto \
   --max-concurrency 2 \
@@ -742,8 +713,8 @@ from one to fifteen.
 
 Limits.
 
-- Only the five `(model_id, weights_id)` artifact identities listed above are accepted product
-  identities.
+- Only the five registered `(model_id, weights_id)` artifact identities are accepted product
+  identities; this fork is built and measured against the Qwen3.8-27B NVFP4 pair listed above.
 - Execution is specialized for the RTX 5090. One CUDA device is the default; the 27B execution
   package also runs on exactly two with `--tp 2 --devices A,B`, which is a capacity feature rather
   than scale-out. This fork adds measurements on 2× RTX 5060 Ti (16 GiB); the build target is
