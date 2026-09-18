@@ -1,5 +1,7 @@
 # NInfer
 
+**English** | [简体中文](README.zh-CN.md)
+
 > Selected checkpoints. Maximum single-GPU inference performance, plus a two-GPU path to a
 > 1,048,576-token context.
 
