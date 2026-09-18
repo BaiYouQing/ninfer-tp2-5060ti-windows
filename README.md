@@ -82,6 +82,9 @@ What the converter does, and what it deliberately does not do:
   converter takes the top 131,072 tokens (of 248,320) plus every special token, slices those rows out
   of the output head into `text/draft_head`, and writes their ids as `text/draft_head_token_ids`. The
   head is computed, not copied out of the source, so a different corpus yields a different head.
+  Both the algorithm and the corpus are **upstream's**: the selection and materialization live in
+  `tools/convert/qwen3_6/common/draft_head.py`, and the ranking fixtures ship in `tools/freq_corpus/`
+  with upstream's tree. This tier only wires them to the W4A4 source.
 
 The verification gate is a byte comparison, and the conversion this fork ships passes it on **all
 1310 tensor objects plus the six frontend resources**. The three steps above were re-run from the

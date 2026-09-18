@@ -72,6 +72,8 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
   72k 段对话上 teacher-forced argmax 出它的次数"；转换器取频率最高的 **131,072 个** token（全词表 248,320）
   加上全部 special token，把 output head 里对应的行切出来构成 `text/draft_head`，id 列表写成
   `text/draft_head_token_ids`。它是算出来的、不是从源里搬的，换一份语料就会得到不同的草稿头。
+  **算法和语料都是上游的**：选取与物化在 `tools/convert/qwen3_6/common/draft_head.py`，ranking fixtures
+  随上游仓一起分发在 `tools/freq_corpus/`；这一档只是把它们接到 W4A4 的源上。
 
 校验门槛是逐字节比对，本 fork 的产物在 **1310 个张量对象 + 6 个前端资源**上全部通过。上面这三步在本 fork
 的机器上从公开源**重跑过一遍**，产出的文件与随本 fork 发布的产物**逐字节相同**（SHA-256 见上表）。完整页面见
