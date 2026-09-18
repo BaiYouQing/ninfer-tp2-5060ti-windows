@@ -248,7 +248,8 @@ GPQA-Diamond、ERQA、RealWorldQA，EvalScope 1.9.0、单样本）。注意那�
 ## 构建要求
 
 - 64 位 Linux；
-- 一块 NVIDIA GeForce RTX 5090（`sm_120a`），或两块用于 `--tp 2`（本 fork 另在 2× RTX 5060 Ti 上实测）；
+- **两块** NVIDIA GeForce RTX 5060 Ti（每块 16 GiB）—— 本 fork 就在这个平台上构建与实测；引擎本身可以在
+  任意 `sm_120a` 设备上跑，一块或两块都行；
 - NVIDIA 驱动支持 CUDA 13.1，且 CUDA Toolkit 为 13.1 或更新；
 - CMake 3.28 或更新，以及支持 C++20 的 host 编译器；
 - `pkg-config`；
@@ -286,7 +287,7 @@ build/apps/ninfer-serve
 | | 本 fork | 上游 `master` |
 |---|---|---|
 | `--kv-dtype` | `bf16`、`int8`、`fp8`、**`k16v8`**（BF16 key + FP8 value） | `bf16`、`int8`、`fp8`、`nvfp4`、`k8v4` |
-| 张量并行 | `--tp 2 --devices A,B`，已在 2× RTX 5090 与 2× RTX 5060 Ti 上验证 | 单卡 |
+| 张量并行 | `--tp 2 --devices A,B`，已在 2× RTX 5060 Ti 上验证 | 单卡 |
 | `/health` | 反映引擎可用性，并在引擎挂掉时由 supervisor 拉起 | 反映引擎可用性 |
 
 想要 `nvfp4` / `k8v4` 档，或上游最新的单卡调度工作，用上游。想要在两张消费级卡上做张量并行服务、
@@ -315,8 +316,9 @@ build/apps/ninfer-serve
 **限制。**
 
 - 只接受注册的五个 `(model_id, weights_id)` 产物 identity（上表覆盖其中两个）；
-- 执行专门面向 RTX 5090。默认一个 CUDA 设备；27B 执行包也支持正好两个（`--tp 2 --devices A,B`），
-  这是容量特性而不是横向扩展。本 fork 增加了 2× RTX 5060 Ti（16 GiB）上的实测；构建目标两边都是 `sm_120a`；
+- 执行目标是 `sm_120a` 消费级 Blackwell；本 fork 就是在**两块** RTX 5060 Ti（每块 16 GiB）上用
+  `--tp 2 --devices A,B` 构建与实测的。引擎默认一个 CUDA 设备，27B 执行包也支持正好两个 —— 这是容量特性
+  而不是横向扩展；
 - 一个 Engine 持有一份常驻模型，启动时固定 1–8 个并发请求容量；decode-ready 的请求在轮边界被压缩进一次
   批处理前向；
 - 没有大规模 / 抢占式连续批处理、没有优先级与 QoS 调度、没有 CPU/GPU offload、也不是分布式服务；

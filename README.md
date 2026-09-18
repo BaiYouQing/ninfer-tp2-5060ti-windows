@@ -176,7 +176,8 @@ measured on upstream's artifacts, not on this fork's conversion.
 NInfer currently requires:
 
 - 64-bit Linux;
-- one NVIDIA GeForce RTX 5090 (`sm_120a`), or two for `--tp 2`;
+- two NVIDIA GeForce RTX 5060 Ti (16 GiB each), which is the platform this fork is built and
+  measured on; the engine itself runs on any `sm_120a` device, one or two;
 - NVIDIA driver support for CUDA 13.1 and the CUDA Toolkit 13.1 or newer;
 - CMake 3.28 or newer and a C++20-capable host compiler;
 - `pkg-config`;
@@ -425,10 +426,10 @@ Limits.
 
 - Only the five registered `(model_id, weights_id)` artifact identities are accepted product
   identities; this fork is built and measured against the Qwen3.8-27B NVFP4 pair listed above.
-- Execution is specialized for the RTX 5090. One CUDA device is the default; the 27B execution
-  package also runs on exactly two with `--tp 2 --devices A,B`, which is a capacity feature rather
-  than scale-out. This fork adds measurements on 2× RTX 5060 Ti (16 GiB); the build target is
-  `sm_120a` either way.
+- Execution targets `sm_120a` consumer Blackwell, and this fork is built and measured on exactly two
+  RTX 5060 Ti (16 GiB each) with `--tp 2 --devices A,B`. One CUDA device is the engine's default, and
+  the 27B execution package also runs on exactly two, which is a capacity feature rather than
+  scale-out.
 - One Engine owns one resident model and supports a startup-fixed capacity of 1–8 active requests.
   Decode-ready requests are compacted at round boundaries and executed in one batched model
   traversal.
@@ -459,7 +460,7 @@ branch as ahead of *and* behind `Neroued:master` -- that is the state of this li
 | | this fork | upstream `master` |
 |---|---|---|
 | `--kv-dtype` | `bf16`, `int8`, `fp8`, **`k16v8`** (BF16 keys + FP8 values) | `bf16`, `int8`, `fp8`, `nvfp4`, `k8v4` |
-| Tensor parallelism | `--tp 2 --devices A,B`, validated on 2× RTX 5090 and 2× RTX 5060 Ti | single GPU |
+| Tensor parallelism | `--tp 2 --devices A,B`, validated on 2× RTX 5060 Ti | single GPU |
 | `/health` | engine availability, plus a supervisor-driven restart when the engine dies | engine availability |
 
 If you want `nvfp4` / `k8v4` KV tiers or upstream's newest single-GPU scheduling work, use upstream.
