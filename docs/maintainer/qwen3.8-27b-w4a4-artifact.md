@@ -102,9 +102,10 @@ Known limitations and caveats:
   `output` layer (4) in BF16; the W4A4 source stores them as NVFP4, so the converter keeps them that
   way instead of down-converting. This states a property of the source, not of any artifact's
   tensor-parallel support: upstream's `qwen3.8-27b/nvfp4` artifact (whose exception layers are
-  row-scaled FP8, not BF16) is the artifact the TP2 campaign in the repository README was run on.
-  Whether this W4A4 tier and that FP8 tier behave identically under `--tp 2` on this fork's hardware
-  has not been measured side by side.
+  row-scaled FP8, not BF16) is the artifact the TP2 campaign in the repository README was run on, and
+  the same artifact has since been run here at `--tp 2`: it loads and generates normally on 2x RTX
+  5060 Ti (10.08 GiB of weights per card, int8 KV, 32,768-token context, 38 tok/s decode with MTP
+  off). The two tiers were not compared token by token.
 - **`gdn/convolution` is transposed, not reshaped.** The source stores the GDN causal-convolution
   weight as `(C, 1, K)`; the engine reads it as `[K, C]`. The converter transposes (and asserts the
   shape). A plain reshape would keep the flat order and silently corrupt all 48 GDN layers.

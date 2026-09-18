@@ -106,8 +106,12 @@ The engine also registers upstream's identities — the official
 (`qwen3_8_27b_nvfp4.ninfer`, 21,492,695,040 bytes, SHA-256
 `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`), Qwen3.6-27B in both weight
 profiles, Qwen3.8-27B `groupwise-int`, and Qwen3.6-35B-A3B — and accepts them; they are outside what
-this fork is built and measured against. Current builds accept only the version-2 container, and all
-of those are version 2.
+this fork is built and measured against, with one measurement worth recording: the official `nvfp4`
+artifact was also run at `--tp 2` here, and it loads and generates normally on 2× RTX 5060 Ti (10.08
+GiB of weights per card, 38 tok/s decode with MTP off). With `int8` KV, a single slot fits that
+artifact's whole 262,144-token native ceiling and still leaves 842 MiB free per card. The W4A4 form
+is the model this fork wanted to run, not a tensor-parallel requirement. Current builds accept only
+the version-2 container, and all of those are version 2.
 
 Every `.ninfer` file contains the weights and frontend resources NInfer needs. It is not a
 Transformers checkpoint, Safetensors distribution, or GGUF file. Each artifact is complete, while GPU

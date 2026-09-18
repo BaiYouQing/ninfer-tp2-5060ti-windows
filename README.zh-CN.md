@@ -93,8 +93,11 @@ NInfer 刻意只支持一组封闭的产物、不做通用模型运行时。引�
 [`Qwen3.8-27B NVFP4`](https://huggingface.co/neroued/Qwen3.8-27B-nvfp4-NInfer) 产物
 （`qwen3_8_27b_nvfp4.ninfer`，21,492,695,040 B，SHA-256
 `bb3360522a06e136e0367f5703414d26272b7285c8a6ab6194135c17dbd81b32`）、Qwen3.6-27B 两个档、
-Qwen3.8-27B 的 `groupwise-int`、Qwen3.6-35B-A3B —— 只是它们不在本 fork 的构建与实测范围内。当前构建只
-接受 version-2 容器，上面这些也都是 version 2。
+Qwen3.8-27B 的 `groupwise-int`、Qwen3.6-35B-A3B —— 只是它们不在本 fork 的构建与实测范围内。有一条实测
+值得记下来：**官方 `nvfp4` 产物也在这里的 `--tp 2` 下跑过**，在 2× RTX 5060 Ti 上加载与生成都正常
+（每卡权重 10.08 GiB、未开 MTP 时 decode 38 tok/s）；用 `int8` KV 时**单槽能吃满它 262,144 token 的原生上限**，
+每卡还余 842 MiB。⇒ 上面的 W4A4 形态是本 fork 想跑的模型，**不是张量并行的硬要求**。当前构建只接受
+version-2 容器，上面这些也都是 version 2。
 
 每个 `.ninfer` 文件里含 NInfer 需要的全部权重与前端资源，它不是 Transformers checkpoint、不是 Safetensors
 分发、也不是 GGUF。产物本身完整，而 GPU 常驻在进程启动时就已固定：**投机解码默认关闭**（MTP/DFlash 状态
