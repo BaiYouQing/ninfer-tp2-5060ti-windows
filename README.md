@@ -45,7 +45,7 @@ build it from the published source with the in-tree converter.
 | Source files | `model-nvfp4-fast.safetensors` (18,822,252,240 B, SHA-256 `9b7e1c4d839995ee9ed35ac682ecf31e81ae4bc6ddb4e3aaa7f585b786bb83a0`) and `vision-mtp-bf16.safetensors` (1,770,897,648 B), plus the index and six frontend resources |
 | Source check | the directory's `SHA256SUMS`, and `manifest.json` with `source_package_sha256 = 2d2eac20ceb1439ab85eda4c5d616150f1c1f4956729333cc6e6e15e49739b21` |
 | Converter | [`tools/convert/qwen3_8_27b/convert_w4a4.py`](tools/convert/qwen3_8_27b/convert_w4a4.py) |
-| Result | `qwen3_8_27b_nvfp4w4a4.ninfer`, 17,555,334,916 bytes (16.35 GiB) |
+| Result | `qwen3_8_27b_nvfp4w4a4.ninfer`, 17,555,334,916 bytes (16.35 GiB), SHA-256 `63c204d223e73d63d6d4db8a82aa3f4859592cd83b00545bcee38334643341cb` |
 
 ### How the artifact is built
 
@@ -81,7 +81,9 @@ What the converter does, and what it deliberately does not do:
   head is computed rather than copied out of the source.
 
 The verification gate is a byte comparison, and the conversion this fork ships passes it on **all
-1310 tensor objects plus the six frontend resources**. The full page is
+1310 tensor objects plus the six frontend resources**. The three steps above were re-run from the
+published source on this fork's machine and produced a file **byte-identical** to the artifact it
+ships (same SHA-256 as the table above). The full page is
 [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md).
 
 ### Other registered artifacts

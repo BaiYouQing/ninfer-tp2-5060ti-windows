@@ -38,7 +38,7 @@ NVIDIA GeForce RTX 5090，通过本地 CLI 或 OpenAI / Anthropic 兼容的 HTTP
 | 源文件 | `model-nvfp4-fast.safetensors`（18,822,252,240 B，SHA-256 `9b7e1c4d839995ee9ed35ac682ecf31e81ae4bc6ddb4e3aaa7f585b786bb83a0`）与 `vision-mtp-bf16.safetensors`（1,770,897,648 B），加索引和 6 个前端资源 |
 | 源校验 | 目录里的 `SHA256SUMS`；`manifest.json` 的 `source_package_sha256 = 2d2eac20ceb1439ab85eda4c5d616150f1c1f4956729333cc6e6e15e49739b21` |
 | 转换器 | [`tools/convert/qwen3_8_27b/convert_w4a4.py`](tools/convert/qwen3_8_27b/convert_w4a4.py) |
-| 结果 | `qwen3_8_27b_nvfp4w4a4.ninfer`，17,555,334,916 B（16.35 GiB） |
+| 结果 | `qwen3_8_27b_nvfp4w4a4.ninfer`，17,555,334,916 B（16.35 GiB），SHA-256 `63c204d223e73d63d6d4db8a82aa3f4859592cd83b00545bcee38334643341cb` |
 
 ### 产物是怎么转出来的
 
@@ -70,7 +70,8 @@ python3 -m tools.convert.qwen3_8_27b.convert_w4a4 \
 - **优化草稿头是算出来的**：由 output head 加频率语料导出（`--draft-ranking`，默认
   `tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64`），不是从源里搬的。
 
-校验门槛是逐字节比对，本 fork 的产物在 **1310 个张量对象 + 6 个前端资源**上全部通过。完整页面见
+校验门槛是逐字节比对，本 fork 的产物在 **1310 个张量对象 + 6 个前端资源**上全部通过。上面这三步在本 fork
+的机器上从公开源**重跑过一遍**，产出的文件与随本 fork 发布的产物**逐字节相同**（SHA-256 见上表）。完整页面见
 [docs/maintainer/qwen3.8-27b-w4a4-artifact.md](docs/maintainer/qwen3.8-27b-w4a4-artifact.md)。
 
 ### 引擎还注册了哪些产物

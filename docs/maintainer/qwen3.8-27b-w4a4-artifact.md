@@ -17,6 +17,10 @@ model_id   = qwen3.8-27b
 weights_id = nvfp4-w4a4
 ```
 
+A build produced by the converter below is 17,555,334,916 bytes and hashes to
+`63c204d223e73d63d6d4db8a82aa3f4859592cd83b00545bcee38334643341cb`; reproducing that hash from the
+published source is the end-to-end check on this page.
+
 `nvfp4-w4a4` is a distinct registered identity: it reuses the Qwen3.6-27B NVFP4 tier (its recipe and
 inventory) but keeps the nine layers that tier leaves in BF16 as NVFP4, because the W4A4 source stores
 them as NVFP4. The engine resolves the identity without a runtime profile flag.
