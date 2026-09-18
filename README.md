@@ -3,8 +3,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 > Tensor-parallel NInfer on two consumer cards. Qualified on **2× RTX 5060 Ti (16 GiB each)**: one
-> 27B model resident across both GPUs, a **253,952-token single-slot context**, four KV-cache tiers
-> (`bf16` / `int8` / `fp8` / `k16v8`), MTP3 speculative decoding with prefix reuse that actually
+> 27B model resident across both GPUs, a **253,952-token single-slot context**, five KV-cache tiers
+> (`bf16` / `int8` / `fp8` / `k16v8` / `k16i8`), MTP3 speculative decoding with prefix reuse that actually
 > hits, and a `/health` that reports engine availability.
 
 NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints. It runs
@@ -19,7 +19,7 @@ measures is in the fork note.
 > [giocom/ninfer-3060X2](https://github.com/giocom/ninfer-3060X2)) and, on that base, adds **dual-GPU
 > tensor parallelism** (`--tp 2 --devices A,B`) to the 27B execution package: one resident model, one
 > process, two devices, no NVLink and no distributed serving, halving per-card weight and KV residency.
-> This fork further adds **KV-cache tiers** (`--kv-dtype bf16|int8|fp8|k16v8`), a **working MTP prefix
+> This fork further adds **KV-cache tiers** (`--kv-dtype bf16|int8|fp8|k16v8|k16i8`), a **working MTP prefix
 > reuse at `--tp 2`**, and a **truthful `/health`** with supervisor-driven self-heal; those three were
 > measured on **2× RTX 5060 Ti (16 GiB each)**. `--tp 1` output is byte-identical to `feaf4dd` on the
 > greedy cases in [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md), and single-GPU
@@ -356,6 +356,14 @@ Measured on 2× RTX 5060 Ti (TP2, one slot, 8k-token prompt, `--spec mtp --draft
 | `fp8` | 4170 tok/s | 91.4 tok/s | 2.69 tok/round | 262144 |
 | `k16v8` | 4480 tok/s | 88.2 tok/s | 2.56 tok/round | 253952 (chunk 1024) / 229376 (chunk 4096) |
 | `bf16` | — | — | 2.89 tok/round | — |
+
+`k16i8` (BF16 keys + INT8 values) is available too. It was added on the theory that INT8's uniform V
+quantization would accept better than E4M3's four-bit mantissa. Measured over five prompts (science,
+horror prose, reasoning, JSON output, prose continuation; greedy, 250 tokens each) it reaches an
+acceptance length of **2.562 tok/round against k16v8's 2.488**, and 92.6 against 89.6 tok/s decode —
+a small but consistent edge (higher on four of five, largest on prose continuation +0.19 and
+structured output +0.08). It costs about 10 MiB more KV per slot at 65536 tokens, because INT8 scales
+every 64 dimensions against FP8's every 256.
 
 Per-round cost is the same across tiers (28.5–29.4 ms); the token-rate spread comes from the
 acceptance length the speculative pairing reaches. `--kv-capacity` must be ≥ `--max-context`, and

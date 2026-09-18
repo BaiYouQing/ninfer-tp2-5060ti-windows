@@ -145,7 +145,7 @@ measured recommendation rather than a semantic limit.
 | `--device N` | CUDA device index | `0` |
 | `--tp 1\|2` | tensor-parallel width; `2` splits the model across two GPUs | `1` |
 | `--devices A,B` | one CUDA device index per `--tp` rank; required for `--tp 2` | `--device` |
-| `--kv-dtype bf16\|int8\|fp8\|k16v8` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|k16v8\|k16i8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

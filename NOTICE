@@ -53,7 +53,7 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 This tree continues from the TP2/YaRN fork above and adds:
 
-  * KV-cache tiers for the 27B artifacts: --kv-dtype bf16|int8|fp8|k16v8, with
+  * KV-cache tiers for the 27B artifacts: --kv-dtype bf16|int8|fp8|k16v8|k16i8, with
     per-side key/value codecs (INT8 group-64, FP8 e4m3 row-256, and BF16 keys with
     FP8 values) wired through the paged KV pool, the attention read/write points,
     prefill staging and the split policy -- src/core, src/ops/kernel,

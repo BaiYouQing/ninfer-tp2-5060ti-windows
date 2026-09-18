@@ -3,7 +3,7 @@
 # NInfer
 
 > 跑在**两张消费级卡**上的 NInfer 张量并行版。在 **2× RTX 5060 Ti（每卡 16 GiB）** 上实测：一份 27B 模型
-> 常驻两块卡、**单槽 253,952 token 上下文**、四档 KV cache（`bf16` / `int8` / `fp8` / `k16v8`）、
+> 常驻两块卡、**单槽 253,952 token 上下文**、五档 KV cache（`bf16` / `int8` / `fp8` / `k16v8` / `k16i8`）、
 > MTP3 投机解码且前缀复用真正命中、`/health` 如实反映引擎可用性。
 
 NInfer 是从零写的 C++/CUDA 推理引擎，只支持**显式注册**的 Qwen 系列 checkpoint。它通过本地 CLI 或
@@ -18,7 +18,7 @@ OpenAI / Anthropic 兼容的 HTTP 接口处理文本、图像与视频输入；�
 > **双卡张量并行**（`--tp 2 --devices A,B`：把每卡权重与 KV 常驻减半；一个进程、一份模型、两块卡，
 > 不用 NVLink，也不是分布式服务）。
 >
-> **本 fork 又加了三项**：**KV cache 档位**（`--kv-dtype bf16|int8|fp8|k16v8`）、**在 `--tp 2` 下真正生效
+> **本 fork 又加了三项**：**KV cache 档位**（`--kv-dtype bf16|int8|fp8|k16v8|k16i8`）、**在 `--tp 2` 下真正生效
 > 的 MTP 前缀复用**、以及**如实反映引擎可用性的 `/health`**（配合 supervisord 自愈）。这三项的实测平台是
 > **2× RTX 5060 Ti（每卡 16 GiB）**。`--tp 1` 的贪心输出与 `feaf4dd` 逐字节一致
 > （见 [`tests/data/tp1-golden/`](tests/data/tp1-golden/MANIFEST.md)）；单卡行为、支持的 identity、产物格式
@@ -237,6 +237,12 @@ BF16 上做，档位只改变常驻占用与读回路径。
 | `fp8` | 4170 tok/s | 91.4 tok/s | 2.69 tok/轮 | 262144 |
 | `k16v8` | 4480 tok/s | 88.2 tok/s | 2.56 tok/轮 | 253952（chunk 1024）/ 229376（chunk 4096） |
 | `bf16` | — | — | 2.89 tok/轮 | — |
+
+还提供 `k16i8`（BF16 key + INT8 value）：加它是因为 INT8 的均匀量化可能在接受率上优于 E4M3 的 4 位尾数。
+在五个 prompt 上实测（科普 / 恐怖小说 / 推理 / JSON 输出 / 散文续写，greedy、各 250 token）：接受长度
+**2.562 tok/轮，对比 k16v8 的 2.488**，decode 92.6 对 89.6 tok/s —— 幅度小但方向一致（五个里四个更高，
+散文续写 +0.19、结构化输出 +0.08 最明显）。代价是 65536 上下文下每槽多约 10 MiB KV，因为 INT8 每 64 维
+一个 scale，而 FP8 是每 256 维。
 
 各档的**每轮耗时基本相同**（28.5–29.4 ms），token 速率差异来自投机解码达到的接受长度。`--kv-capacity`
 必须 ≥ `--max-context`；要把某档顶到它的上限就必须用**显式**容量（`auto` 会预留 512 MiB 的 sizing
