@@ -2,12 +2,15 @@
 
 # NInfer
 
-> 选定 checkpoint，追求单卡推理性能上限；另有一条双卡路径，把上下文做到 1,048,576 token。
+> 跑在**两张消费级卡**上的 NInfer 张量并行版。在 **2× RTX 5060 Ti（每卡 16 GiB）** 上实测：一份 27B 模型
+> 常驻两块卡、**单槽 253,952 token 上下文**、四档 KV cache（`bf16` / `int8` / `fp8` / `k16v8`）、
+> MTP3 投机解码且前缀复用真正命中、`/health` 如实反映引擎可用性。本树继承的上游单卡 RTX 5090 工作
+> （含 YaRN 的 1,048,576 token 路径）属于上游；正文里哪张表来自哪台机器都有标注。
 
 NInfer 是从零写的 C++/CUDA 推理引擎，只支持**显式注册**的 Qwen 系列 checkpoint。它面向一块
 NVIDIA GeForce RTX 5090，通过本地 CLI 或 OpenAI / Anthropic 兼容的 HTTP 接口处理文本、图像与
 视频输入。27B 执行包另外支持在**两块** RTX 5090 上做张量并行，并可用 YaRN 位置缩放把上下文
-拉到 1,048,576 token。
+拉到 1,048,576 token。上面这段描述的是**上游**；本 fork 加了什么、实测了什么，见下面的 fork 说明。
 
 > **这是一个 fork。** 上游是 [Neroued/ninfer](https://github.com/Neroued/ninfer)；本树的起点是上游
 > 的 `feaf4dd`，经由 TP2 这条线

@@ -2,14 +2,19 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-> Selected checkpoints. Maximum single-GPU inference performance, plus a two-GPU path to a
-> 1,048,576-token context.
+> Tensor-parallel NInfer on two consumer cards. Qualified on **2× RTX 5060 Ti (16 GiB each)**: one
+> 27B model resident across both GPUs, a **253,952-token single-slot context**, four KV-cache tiers
+> (`bf16` / `int8` / `fp8` / `k16v8`), MTP3 speculative decoding with prefix reuse that actually
+> hits, and a `/health` that reports engine availability. The single-GPU RTX 5090 work this tree
+> inherits -- including the YaRN 1,048,576-token path -- is upstream's; the body marks which figures
+> come from which hardware.
 
 NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints on a
 single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
 OpenAI-/Anthropic-compatible HTTP APIs. The 27B execution package additionally runs tensor-parallel
 across two RTX 5090s and, with YaRN positional scaling, serves contexts up to 1,048,576 tokens --
-see [Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context).
+see [Dual-GPU (TP2) and YaRN 1M context](#dual-gpu-tp2-and-yarn-1m-context). The paragraphs above
+describe upstream; what this fork adds and measures is in the fork note below.
 
 > **This is a fork.** Upstream is [Neroued/ninfer](https://github.com/Neroued/ninfer); this tree
 > branches from its commit `feaf4dd` via the TP2 line
