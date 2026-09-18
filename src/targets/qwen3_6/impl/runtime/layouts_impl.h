@@ -735,16 +735,20 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->kv_v_quant_group    = inputs.kv_v_quant_group;
     // attention workspace 的档位参数（gqa_attention_workspace_capacity_bytes）只取决于 K 侧：
     // 它唯一的 dtype 消费者是 gqa_attention_split_capacity（QK 的 MMA 路径），V 侧的 staging 在
-    // 内核自己的 smem 里，不参与 workspace 尺寸。所以允许「两侧同档」与 k16v8（K=bf16 无 scale +
-    // V=e4m3 每 256 维 1 个 scale），其余组合显式拒绝。
+    // 内核自己的 smem 里，不参与 workspace 尺寸。所以允许「两侧同档」与「K=bf16 无 scale 配
+    // V 的任一 8 位档」（k16v8 = V e4m3 每 256 维 1 个 scale；k16i8 = V i8 每 64 维 1 个 scale），
+    // 其余组合显式拒绝。
     const bool same_side = inputs.kv_k_dtype == inputs.kv_v_dtype &&
                            inputs.kv_k_quant_group == inputs.kv_v_quant_group;
-    const bool k16v8     = inputs.kv_k_dtype == DType::BF16 && inputs.kv_k_quant_group == 0 &&
-                       inputs.kv_v_dtype == DType::FP8_E4M3FN &&
-                       inputs.kv_v_quant_group == qwen3_6::kKvFp8ScaleGroup;
-    if (!same_side && !k16v8) {
+    const bool k16_8bit_v = inputs.kv_k_dtype == DType::BF16 && inputs.kv_k_quant_group == 0 &&
+                            ((inputs.kv_v_dtype == DType::FP8_E4M3FN &&
+                              inputs.kv_v_quant_group == qwen3_6::kKvFp8ScaleGroup) ||
+                             (inputs.kv_v_dtype == DType::I8 &&
+                              inputs.kv_v_quant_group == qwen3_6::kKvQuantGroup));
+    if (!same_side && !k16_8bit_v) {
         throw std::invalid_argument(
-            "unsupported per-side KV codec combination（目前只接通 k16v8 = bf16 K + e4m3 V）");
+            "unsupported per-side KV codec combination（目前只接通「两侧同档」与 "
+            "K=bf16 无 scale + V 的 e4m3/i8 两档）");
     }
     impl->kv_dtype            = inputs.kv_k_dtype;
     impl->kv_quant_group      = inputs.kv_k_quant_group;
