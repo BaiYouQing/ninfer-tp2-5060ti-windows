@@ -154,6 +154,15 @@ usage 里：OpenAI 侧是 `usage.prompt_tokens_details.cached_tokens`，Anthropi
 `apps/ninfer-serve` 会以非零码退出，让 supervisor（`Restart=on-failure`）在约 16 s 内重新加载模型，而不是留一个
 死掉的服务端口在那里。
 
+## 性能与评测
+
+本 README 的性能数据就是上一节（2× RTX 5060 Ti、`--tp 2`、单槽）。
+
+**能力评测：本 fork 没有预算去跑 benchmark**，所以这里不列任何分数。想看分数去模型仓库 —— 各产物的
+model card（`model-cards/`）以及它们在 Hugging Face 上的页面里有上游的成绩（AIME 2025/2026、
+GPQA-Diamond、ERQA、RealWorldQA，EvalScope 1.9.0、单样本）。注意那些是在**上游的产物**上测的，
+不是本 fork 转换出来的这一份。
+
 ## 构建要求
 
 - 64 位 Linux；

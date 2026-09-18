@@ -140,94 +140,22 @@ artifact conversion and the complete option set.
 
 ## Performance
 
-The published measurements cover the three Qwen3.6 artifact profiles and the Qwen3.8-27B NVFP4
-profile. The Qwen3.8-27B `groupwise-int` profile is supported by current NInfer builds but is not
-yet included in a published benchmark campaign.
+This README carries this fork's own numbers in
+[KV-cache tiers and long-context limits](#kv-cache-tiers-and-long-context-limits): 2× RTX 5060 Ti,
+`--tp 2`, one slot, per-tier prefill/decode/acceptance and the long-context ceilings.
 
-### Concurrent MTP3 decode
-
-Saturated decode was measured on an RTX 5090 with INT8 group-64 KV cache, CUDA Graphs, MTP3, and
-one 8,192-token generation per active request. The values below are aggregate committed decode
-throughput from complete one-second intervals in which the actual decode batch remained equal to
-the configured concurrency. MTP acceptance is aggregated over the complete request wave. Each
-concurrency cell reports `decode tok/s / MTP acceptance`; profiles should be read independently.
-
-| Model profile | C=1 tok/s / accept | C=2 tok/s / accept | C=4 tok/s / accept | C=8 tok/s / accept | C8 / C1 |
-|---|---:|---:|---:|---:|---:|
-| Qwen3.6-27B `groupwise-int` | 185.8 / 68.2% | 247.0 / 69.0% | 309.5 / 68.4% | 535.0 / 68.3% | 2.88× |
-| Qwen3.6-27B `nvfp4` | 202.4 / 69.3% | 399.7 / 71.4% | 699.7 / 69.3% | 1,146.9 / 68.6% | 5.67× |
-| Qwen3.6-35B-A3B `groupwise-int` | 593.0 / 67.2% | 877.7 / 68.2% | 1,166.0 / 69.8% | 1,313.8 / 67.3% | 2.22× |
-| Qwen3.8-27B `nvfp4` | 143.8 / 48.9% | 267.6 / 48.1% | 461.1 / 45.8% | 766.6 / 46.0% | 5.33× |
-
-At C=8, Qwen3.6-35B-A3B reaches **1,313.8 aggregate decode tok/s**. Qwen3.6-27B NVFP4 reaches
-**1,146.9 tok/s** and **5.67×** its C=1 throughput. Qwen3.8-27B NVFP4 has **45.8–48.9%** MTP
-acceptance, versus **67.2–71.4%** across the other measured profiles, so aggregate committed
-throughput reflects both execution performance and speculative acceptance.
-
-### Single-request serving
-
-The single-request corpus was measured on the same GPU with INT8 group-64 KV cache, CUDA Graphs,
-and a 1,024-token prefill chunk. Each reported fixture uses five fixed seeds after server warm-up.
-Targets and weight profiles are reported independently rather than as cross-target comparisons.
-Requests were submitted serially to a persistent server. The Qwen3.8-27B NVFP4 MTP0 results use the
-same dedicated serial corpus runner as the Qwen3.6 profiles; its MTP3 results come from the C=1 point
-of the fixed concurrent-corpus campaign documented in [Performance](docs/performance.md).
-
-**Qwen3.6-35B-A3B**
-
-- MTP0 at a 7,680-token prompt: **15,544.3 prefill tok/s** and **271.1 decode tok/s**.
-- MTP0 at a 260,096-token prompt: **5,157.1 prefill tok/s** and **188.2 decode tok/s**.
-- MTP3 long reasoning: **620.3–726.2 decode tok/s** with **72.7–82.8% acceptance**.
-- MTP3 structured output: **770.9 decode tok/s**, **89.1% acceptance**, and **3.67 tokens/round**.
-
-**Qwen3.6-27B (`groupwise-int`)**
-
-- MTP0 at a 7,680-token prompt: **3,218.1 prefill tok/s** and **77.6 decode tok/s**.
-- MTP0 at a 260,096-token prompt: **1,614.8 prefill tok/s** and **54.8 decode tok/s**.
-- MTP3 long reasoning: **161.9–175.4 decode tok/s** with **73.4–78.8% acceptance**.
-- MTP3 structured output: **193.0 decode tok/s**, **88.7% acceptance**, and **3.66 tokens/round**.
-
-**Qwen3.6-27B (`nvfp4`)**
-
-- MTP0 at a 7,680-token prompt: **11,191.5 prefill tok/s** and **86.4 decode tok/s**.
-- MTP0 at a 260,096-token prompt: **2,510.6 prefill tok/s** and **59.9 decode tok/s**.
-- MTP3 long reasoning: **213.1–231.0 decode tok/s** with **76.3–81.1% acceptance**.
-- MTP3 structured output: **252.2 decode tok/s**, **89.8% acceptance**, and **3.69 tokens/round**.
-- Against groupwise-int on the same corpus and runtime options: **3.48× the 7,680-token prefill
-  throughput**, **1.55× the 260,096-token prefill throughput**, and **30–32% higher MTP3 decode
-  throughput**.
-
-**Qwen3.8-27B (`nvfp4`)**
-
-- MTP0 at a 7,680-token prompt: **8,340.4 prefill tok/s** and **71.2 decode tok/s**.
-- MTP0 at a 260,096-token prompt: **2,203.1 prefill tok/s** and **52.9 decode tok/s**.
-- MTP3 long reasoning: **151.4–195.2 decode tok/s** with **56.2–76.0% acceptance**.
-- MTP3 structured output: **219.8 decode tok/s**, **90.8% acceptance**, and **3.72 tokens/round**.
-
-See [Performance](docs/performance.md) for the full methodology, variability, reproduction command,
-and per-fixture results.
+Upstream's single-GPU RTX 5090 campaign (Qwen3.6-27B in both weight profiles, Qwen3.6-35B-A3B, and
+the Qwen3.8-27B NVFP4 artifact) is documented in [Performance](docs/performance.md) and in the model
+cards. Those figures were not measured here and are not comparable to figures taken on two 16 GiB
+cards.
 
 ## Evaluation
 
-Capability scores were measured through NInfer's OpenAI-compatible serving route with thinking
-enabled, MTP=3, and EvalScope 1.9.0 (0-shot, rule scoring, one sample per problem):
-
-| Model profile | AIME 2025 | AIME 2026 | GPQA-Diamond | ERQA | RealWorldQA |
-|---|---:|---:|---:|---:|---:|
-| [Qwen3.6-27B groupwise-int](model-cards/Qwen3.6-27B-NInfer/README.md) | 86.67% | 93.33% | 86.87% | — | — |
-| [Qwen3.6-27B NVFP4](model-cards/Qwen3.6-27B-nvfp4-NInfer/README.md) | 93.33% | 93.33% | 84.34% | — | — |
-| [Qwen3.6-35B-A3B groupwise-int](model-cards/Qwen3.6-35B-A3B-NInfer/README.md) | 90.00% | 90.00% | 85.35% | — | — |
-| [Qwen3.8-27B groupwise-int](model-cards/Qwen3.8-27B-NInfer/README.md) | 96.67% | 96.67% | 87.37% | 66.25% | 82.22% |
-| [Qwen3.8-27B NVFP4](model-cards/Qwen3.8-27B-nvfp4-NInfer/README.md) | 96.67% | 96.67% | 90.40% | 66.25% | 83.53% |
-
-The Qwen3.6 rows used temperature 0.6 and presence penalty 1.0; the Qwen3.8-27B rows used
-temperature 1.0 and presence penalty 0.0. The multimodal columns (ERQA and RealWorldQA) ran with
-`--vision` at a 81,920-token context limit; the text columns used a 262,144-token limit except
-Qwen3.8-27B NVFP4, which needs 252,928 to fit the RTX 5090 after weights.
-
-These are single-sample results under that NInfer evaluation profile, not pass@k. See the model
-cards and [full performance document](docs/performance.md) for correct/total counts and evaluation
-notes.
+This fork has no budget for a capability evaluation of its own, so no benchmark table is published
+here. For scores, see the model repositories: the per-artifact model cards under
+[`model-cards/`](model-cards/) and the artifacts' Hugging Face pages carry upstream's results
+(AIME 2025/2026, GPQA-Diamond, ERQA, RealWorldQA, EvalScope 1.9.0, single sample). Those were
+measured on upstream's artifacts, not on this fork's conversion.
 
 ## Requirements
 
@@ -278,7 +206,7 @@ driver, Docker, and the
 docker build --tag ninfer:local .
 ```
 
-Download a model into `models/` as described below, then run the HTTP server:
+Put the artifact from [The weights](#the-weights) into `models/`, then run the HTTP server:
 
 ```bash
 docker run --rm \
@@ -706,7 +634,8 @@ the YaRN constants, and what each correctness gate actually proves -- are in
 
 ## Capabilities and limits
 
-Capabilities. All three registered model IDs support:
+Capabilities. All three registered model IDs (`qwen3.6-27b`, `qwen3.8-27b`, `qwen3.6-35b-a3b`)
+support:
 
 - text generation with thinking and non-thinking prompt modes;
 - image, multi-image, video, and mixed multimodal messages;
@@ -753,7 +682,7 @@ Limits.
 - Tool calls are parsed and returned to the client; NInfer does not execute tools.
 - The C++ headers are used by the in-tree applications and are not distributed as an installed SDK.
 
-### Relationship to upstream
+## Relationship to upstream
 
 This fork descends from `Neroued/ninfer` at commit `feaf4dd` (2026-08-20) through the TP2 line, and
 carries its own work on that base. Upstream `master` has since advanced more than 200 commits and
