@@ -207,40 +207,6 @@ build/apps/ninfer-serve
 
 Tests, benchmarks, and maintainer tools are excluded from the default build.
 
-## Docker
-
-Build the runtime image on a 64-bit Linux host with an RTX 5090, a CUDA 13.1-compatible NVIDIA
-driver, Docker, and the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-
-```bash
-docker build --tag ninfer:local .
-```
-
-Put the artifact from [The weights](#the-weights) into `models/`, then run the HTTP server:
-
-```bash
-docker run --rm \
-  --gpus '"device=0"' \
-  --publish 8080:8080 \
-  --volume "$PWD/models:/models:ro" \
-  ninfer:local \
-  ninfer-serve /models/qwen3_8_27b_nvfp4.ninfer \
-  --host 0.0.0.0
-```
-
-Run the CLI from the same image:
-
-```bash
-docker run --rm \
-  --gpus '"device=0"' \
-  --volume "$PWD/models:/models:ro" \
-  ninfer:local \
-  ninfer /models/qwen3_8_27b_nvfp4.ninfer \
-  --prompt "Explain prefill and decode in three sentences." \
-  --max-new 256
-```
-
 ## Run the CLI
 
 ```bash
