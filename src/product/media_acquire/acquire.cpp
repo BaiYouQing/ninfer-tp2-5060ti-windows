@@ -2,9 +2,14 @@
 
 #include <curl/curl.h>
 
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
+#if defined(_WIN32)
+#    include <winsock2.h>
+#    include <ws2tcpip.h>
+#else
+#    include <arpa/inet.h>
+#    include <netdb.h>
+#    include <sys/socket.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -142,7 +147,27 @@ UrlParts parse_url(std::string_view value) {
     return out;
 }
 
+#if defined(_WIN32)
+// Winsock requires explicit registration before the portable name-resolution API is usable.
+class WinsockSession {
+public:
+    WinsockSession() {
+        WSADATA data{};
+        if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+            throw std::runtime_error("failed to initialize Winsock");
+        }
+    }
+    ~WinsockSession() { ::WSACleanup(); }
+
+    WinsockSession(const WinsockSession&)            = delete;
+    WinsockSession& operator=(const WinsockSession&) = delete;
+};
+#endif
+
 std::string resolve_public(const UrlParts& url, bool allow_private) {
+#if defined(_WIN32)
+    const WinsockSession winsock;
+#endif
     addrinfo hints{};
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -287,7 +312,8 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
     if (!policy.media_root.empty()) {
         const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
         const auto relative              = std::filesystem::relative(path, root, ec);
-        if (ec || relative.empty() || relative.native().starts_with("..")) {
+        // generic_string() keeps this check portable: on Windows path::native() is a wstring.
+        if (ec || relative.empty() || relative.generic_string().starts_with("..")) {
             throw std::invalid_argument("media path is outside configured media root");
         }
     }

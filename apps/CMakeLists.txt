@@ -1,4 +1,4 @@
-add_executable(ninfer
+﻿add_executable(ninfer
   cli/main.cpp
   cli/options.cpp)
 target_include_directories(ninfer PRIVATE
@@ -9,6 +9,7 @@ target_link_libraries(ninfer PRIVATE
   ninfer_engine
   ninfer_product_load_progress
   ninfer_product_prompt_input)
+ninfer_copy_runtime_dlls(ninfer)
 
 add_executable(ninfer-serve serve/main.cpp)
 target_include_directories(ninfer-serve PRIVATE
@@ -17,3 +18,4 @@ target_include_directories(ninfer-serve PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
 target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_load_progress)
+ninfer_copy_runtime_dlls(ninfer-serve)

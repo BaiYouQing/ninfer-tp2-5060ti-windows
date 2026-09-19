@@ -17,7 +17,9 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <unistd.h>
+#if !defined(_WIN32)
+#    include <unistd.h>
+#endif
 #include <deque>
 #include <exception>
 #include <memory>

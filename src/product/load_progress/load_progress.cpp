@@ -1,6 +1,11 @@
 #include "product/load_progress/load_progress.h"
 
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <io.h>
+#    include <stdio.h>
+#else
+#    include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -59,8 +64,18 @@ std::string format_line(std::string_view phase, std::uint64_t done, std::uint64_
 
 } // namespace
 
+#if defined(_WIN32)
+namespace {
+int stderr_is_tty() noexcept { return ::_isatty(::_fileno(stderr)); }
+} // namespace
+#else
+namespace {
+int stderr_is_tty() noexcept { return ::isatty(STDERR_FILENO); }
+} // namespace
+#endif
+
 LoadProgressRendererOptions stderr_load_progress_options() noexcept {
-    if (::isatty(STDERR_FILENO) == 1) {
+    if (stderr_is_tty() == 1) {
         return LoadProgressRendererOptions{
             .mode                 = LoadProgressOutputMode::Interactive,
             .min_refresh_interval = std::chrono::milliseconds(200),

@@ -10,16 +10,27 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
 namespace ninfer::ops::detail {
 
-struct alignas(128) Nvfp4W4a4TmaDescriptors {
-    CUtensorMap a_codes;
-    CUtensorMap b_codes;
-    CUtensorMap a_scales;
-    CUtensorMap b_scales;
+// A launch parameter cannot use CUtensorMap directly: the type is aligned to 128 bytes, and MSVC
+// rejects over-aligned by-value parameters when it compiles the CUDA host stub (error C2719). The
+// encoded bytes travel in natural alignment and are reinterpreted where the tensormap is consumed.
+// Ported from ninfer-xx90-win.
+struct Nvfp4TmaMapBytes {
+    std::uint64_t word[16];
+};
+
+static_assert(sizeof(Nvfp4TmaMapBytes) == sizeof(CUtensorMap), "tensormap storage size mismatch");
+
+struct Nvfp4W4a4TmaDescriptors {
+    Nvfp4TmaMapBytes a_codes;
+    Nvfp4TmaMapBytes b_codes;
+    Nvfp4TmaMapBytes a_scales;
+    Nvfp4TmaMapBytes b_scales;
 };
 
 inline void nvfp4_check_driver(CUresult status, const char* operation) {
@@ -30,11 +41,11 @@ inline void nvfp4_check_driver(CUresult status, const char* operation) {
                              (name != nullptr ? name : "CUDA error"));
 }
 
-inline CUtensorMap nvfp4_make_tma_2d(void* address, CUtensorMapDataType data_type,
-                                     std::uint64_t columns, std::uint64_t rows,
-                                     std::uint64_t row_stride_bytes, std::uint32_t box_columns,
-                                     std::uint32_t box_rows, CUtensorMapSwizzle swizzle,
-                                     const char* operation) {
+inline Nvfp4TmaMapBytes nvfp4_make_tma_2d(void* address, CUtensorMapDataType data_type,
+                                          std::uint64_t columns, std::uint64_t rows,
+                                          std::uint64_t row_stride_bytes,
+                                          std::uint32_t box_columns, std::uint32_t box_rows,
+                                          CUtensorMapSwizzle swizzle, const char* operation) {
     CUtensorMap map{};
     const std::uint64_t global_dim[]     = {columns, rows};
     const std::uint64_t global_stride[]  = {row_stride_bytes};
@@ -45,7 +56,9 @@ inline CUtensorMap nvfp4_make_tma_2d(void* address, CUtensorMapDataType data_typ
                                element_stride, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle,
                                CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
         operation);
-    return map;
+    Nvfp4TmaMapBytes encoded{};
+    std::memcpy(&encoded, &map, sizeof(encoded));
+    return encoded;
 }
 
 template <class Geometry, int BlockM>
@@ -148,15 +161,17 @@ __device__ __forceinline__ void nvfp4_tma_raster_blocks(int& block_x, int& block
     block_x = linear / rows;
 }
 
-__device__ __forceinline__ void nvfp4_tma_load_2d(void* destination, const CUtensorMap* descriptor,
-                                                  std::int32_t coordinate0,
-                                                  std::int32_t coordinate1,
-                                                  std::uint64_t* barrier) {
+__device__ __forceinline__ void nvfp4_tma_load_2d(void* destination,
+                                                 const Nvfp4TmaMapBytes* descriptor,
+                                                 std::int32_t coordinate0,
+                                                 std::int32_t coordinate1,
+                                                 std::uint64_t* barrier) {
+    const auto* tensormap = reinterpret_cast<const CUtensorMap*>(descriptor);
     asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes "
                  "[%0], [%1, {%2, %3}], [%4];"
                  :
-                 : "r"(smem_addr(destination)), "l"(descriptor), "r"(coordinate0), "r"(coordinate1),
-                   "r"(smem_addr(barrier))
+                 : "r"(smem_addr(destination)), "l"(tensormap), "r"(coordinate0),
+                   "r"(coordinate1), "r"(smem_addr(barrier))
                  : "memory");
 }
 

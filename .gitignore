@@ -46,3 +46,5 @@ profiles/
 
 # Claude Code personal/local settings (may contain API tokens)
 .claude/settings.local.json
+.local/
+*.posix-orig

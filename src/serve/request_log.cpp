@@ -15,12 +15,22 @@
 #include <system_error>
 #include <utility>
 
-#include <unistd.h>
+#if defined(_WIN32)
+#    include <process.h>
+#else
+#    include <unistd.h>
+#endif
 
 namespace ninfer::serve {
 namespace {
 
 using Json = nlohmann::json;
+
+#if defined(_WIN32)
+std::uint64_t process_id() noexcept { return static_cast<std::uint64_t>(::_getpid()); }
+#else
+std::uint64_t process_id() noexcept { return static_cast<std::uint64_t>(::getpid()); }
+#endif
 
 std::uint64_t unix_time_ms() {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -31,7 +41,7 @@ std::uint64_t unix_time_ms() {
 std::string new_server_instance_id() {
     const auto now    = std::chrono::system_clock::now().time_since_epoch();
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-    return "serve-" + std::to_string(static_cast<long long>(::getpid())) + '-' +
+    return "serve-" + std::to_string(static_cast<long long>(process_id())) + '-' +
            std::to_string(micros);
 }
 

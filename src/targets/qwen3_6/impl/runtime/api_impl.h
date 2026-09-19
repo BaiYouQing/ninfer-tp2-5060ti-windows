@@ -17,8 +17,12 @@ SequencePlan<Variant>::SequencePlan(
     std::unique_ptr<detail::SequencePlanImpl<Variant>> impl) noexcept
     : impl_(std::move(impl)) {}
 
+// Windows port: plain out-of-line bodies instead of `= default`. MSVC does not emit an out-of-line
+// defaulted move constructor of a class template (LNK2019 on move construction); every other member
+// in this header is already defined with a body and links fine.
 template <>
-SequencePlan<Variant>::SequencePlan(SequencePlan&&) noexcept = default;
+SequencePlan<Variant>::SequencePlan(SequencePlan&& other) noexcept : impl_(std::move(other.impl_)) {}
+
 template <>
 SequencePlan<Variant>& SequencePlan<Variant>::operator=(SequencePlan&&) noexcept = default;
 template <>
@@ -85,7 +89,9 @@ RequestBasePlan<Variant>::RequestBasePlan(
     : impl_(std::move(impl)) {}
 
 template <>
-RequestBasePlan<Variant>::RequestBasePlan(RequestBasePlan&&) noexcept = default;
+RequestBasePlan<Variant>::RequestBasePlan(RequestBasePlan&& other) noexcept
+    : impl_(std::move(other.impl_)) {}
+
 template <>
 RequestBasePlan<Variant>& RequestBasePlan<Variant>::operator=(RequestBasePlan&&) noexcept = default;
 template <>
@@ -102,7 +108,8 @@ RequestPlan<Variant>::RequestPlan(std::unique_ptr<detail::RequestPlanImpl<Varian
     : impl_(std::move(impl)) {}
 
 template <>
-RequestPlan<Variant>::RequestPlan(RequestPlan&&) noexcept = default;
+RequestPlan<Variant>::RequestPlan(RequestPlan&& other) noexcept : impl_(std::move(other.impl_)) {}
+
 template <>
 RequestPlan<Variant>& RequestPlan<Variant>::operator=(RequestPlan&&) noexcept = default;
 template <>
