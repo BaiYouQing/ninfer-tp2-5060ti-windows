@@ -5,6 +5,7 @@
 #include "core/arena.h"
 #include "core/gdn_replay_records.h"
 #include "ninfer/ops/allreduce.h"
+#include "ninfer/ops/peer_mailbox.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
@@ -331,6 +332,10 @@ public:
     const double yarn_mscale;
     std::optional<PeerRuntime> peer;
     std::optional<ops::PeerEvents> peer_events;
+    // Created once at tp2 when graphs are on: the pinned host slab the captured collectives
+    // exchange through (see ops::PeerMailbox). The staged, event-ordered path in
+    // ops::allreduce_sum stays the only path for eager execution and oversized payloads.
+    std::optional<ops::PeerMailbox> peer_mailbox;
     // Created once at tp2 when graphs are on; forks rank 1's stream into rank 0's capture.
     std::optional<DecodeGraphPeerBridge> graph_bridge;
     std::optional<schedule::TpPeerCore> peer_core;

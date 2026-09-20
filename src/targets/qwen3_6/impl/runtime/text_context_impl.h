@@ -1402,7 +1402,7 @@ PrefillChunkResult TextContext::prefill_chunk(std::span<const int> full_ids, std
     }
     const TextPrefill text_prefill{full_ids, begin};
     if (tp2()) {
-        return prefill_impl_tp2(full_ids.subspan(begin, nominal_length), text_prefill,
+        return prefill_impl_tp2(full_ids.subspan(begin, nominal_length), text_prefill, nullptr,
                                 finalize_at_end);
     }
     NullTap tap;
@@ -1432,11 +1432,15 @@ PrefillChunkResult TextContext::prefill_chunk(const qwen3_6::PreparedPromptData&
         nominal_length > input.token_ids.size() - begin) {
         throw std::invalid_argument("multimodal prefill chunk is outside the prompt");
     }
-    if (tp2()) {
-        throw std::logic_error("multimodal prefill has no tensor-parallel path in this build");
-    }
     const std::span<const int> tokens(input.token_ids);
     const MultimodalPrefill multimodal{tokens, input.positions, &vision, begin, input.rope_delta};
+    if (tp2()) {
+        // The tp2 multimodal path: each rank holds a full copy of the tower and encodes its own
+        // chunk, so nothing is exchanged for vision and both residuals stay identical.
+        const TextPrefill text_prefill{tokens, begin};
+        return prefill_impl_tp2(tokens.subspan(begin, nominal_length), text_prefill, &multimodal,
+                                finalize_at_end);
+    }
     NullTap tap;
     return prefill_impl(tokens.subspan(begin, nominal_length), nullptr, &multimodal, tap,
                         finalize_at_end);
@@ -1942,6 +1946,7 @@ void TextContext::logits_tp2(const std::array<Tensor, 2>& hidden, Tensor& logits
 
 PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
                                                  const TextPrefill& text_prefill,
+                                                 const MultimodalPrefill* multimodal,
                                                  bool finalize_at_end) {
     if (ids.empty()) { throw std::invalid_argument("TextContext::prefill requires tokens"); }
     if (ids.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -1965,9 +1970,11 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
     }
     const int base_i = static_cast<int>(text_kv_base_);
     // tp1 zeroes this only when starting a fresh cache, and otherwise carries whatever a
-    // multimodal chunk set. tp2 has no multimodal path, so a nonzero delta here means a caller
-    // assumption this path does not implement -- say so instead of silently prefilling with 0.
-    if (rope_delta_ != 0) {
+    // multimodal chunk set. Text-only tp2 prefill never produces one, so a nonzero delta without
+    // a multimodal view is still a caller assumption this path does not implement -- say so.
+    // Multimodal prefill is precisely the case that does produce one, and it does not need the
+    // delta at all: it copies the prompt's own 3-axis positions (see the rope block below).
+    if (multimodal == nullptr && rope_delta_ != 0) {
         throw std::logic_error("tensor-parallel prefill does not support a nonzero RoPE delta");
     }
     for_each_rank(execution, [&](int rank) {
@@ -1983,6 +1990,59 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
 
     int len = std::min(chunk, T);
     if (checkpoint_rel > 0 && len > checkpoint_rel) { len = checkpoint_rel; }
+
+    // Vision resolution is host-only and comes first: it may shorten this chunk to the end of
+    // the item it lands in, and both the workspace layout and the nvtx range are sized from the
+    // chunk it settles on. The encode itself cannot run yet -- its embedding buffer lives in the
+    // chunk workspace, which is reset just below.
+    const std::uint32_t prompt_t0 = text_prefill.begin;
+    std::vector<std::int32_t> local_scatter_indices;
+    std::int32_t visual_begin = 0;
+    if (multimodal != nullptr) {
+        if (multimodal->vision == nullptr) {
+            throw std::logic_error("multimodal prefill has no Vision session");
+        }
+        const VisionPrefillSession::ChunkPlan planned =
+            multimodal->vision->plan_chunk(prompt_t0, static_cast<std::uint32_t>(len));
+        len = planned.length;
+        if (planned.control != nullptr) {
+            const auto scatter =
+                std::span<const std::int32_t>(planned.control->scatter_indices);
+            const auto begin = std::lower_bound(scatter.begin(), scatter.end(), prompt_t0);
+            const auto end   = std::lower_bound(begin, scatter.end(), prompt_t0 + len);
+            const auto count = static_cast<std::int32_t>(end - begin);
+            visual_begin     = static_cast<std::int32_t>(begin - scatter.begin());
+            local_scatter_indices.resize(static_cast<std::size_t>(count));
+            for (std::int32_t i = 0; i < count; ++i) {
+                local_scatter_indices[static_cast<std::size_t>(i)] =
+                    begin[i] - static_cast<std::int32_t>(prompt_t0);
+            }
+        }
+    }
+    const std::int32_t rope_axes = multimodal != nullptr ? 3 : (rope_delta_ != 0 ? 1 : 0);
+    const auto scatter_count     = static_cast<std::int32_t>(local_scatter_indices.size());
+    const bool separate_rope     = rope_axes > 0;
+    // The prompt's own 3-axis positions, this chunk's slice. Built once on the host and pushed to
+    // BOTH ranks: identical frequencies on both devices is what keeps the key cache identical.
+    std::vector<std::int32_t> rope_positions_host;
+    if (separate_rope) {
+        rope_positions_host.resize(static_cast<std::size_t>(rope_axes) * len);
+        if (multimodal != nullptr) {
+            const std::size_t prompt_tokens = multimodal->token_ids.size();
+            for (std::int32_t axis = 0; axis < rope_axes; ++axis) {
+                const auto* src = multimodal->positions.data() +
+                                  static_cast<std::size_t>(axis) * prompt_tokens + prompt_t0;
+                std::copy_n(src, len,
+                            rope_positions_host.data() + static_cast<std::size_t>(axis) * len);
+            }
+        } else {
+            for (std::int32_t axis = 0; axis < rope_axes; ++axis) {
+                for (int j = 0; j < len; ++j) {
+                    rope_positions_host[static_cast<std::size_t>(axis) * len + j] = base_i + j;
+                }
+            }
+        }
+    }
     const bool is_last                = finalize_at_end && len == T;
     const bool prepare_mtp_prompt     = mtp_enabled() && io_.mtp.has_value();
     nvtx::ScopedRange chunk_range(nvtx::Name::PrefillChunk, nvtx::Category::Prefill,
@@ -1994,29 +2054,51 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
         auto scope_1 = tp_->work->scope();
         std::array<Tensor, 2> ids_device;
         std::array<Tensor, 2> positions;
+        std::array<Tensor, 2> rope_positions;
+        std::array<Tensor, 2> scatter_indices;
         std::array<Tensor, 2> x;
         std::array<Tensor, 2> staging;
         for (std::size_t r = 0; r < 2; ++r) {
-            const auto roots = workspace_recipe::text_prefill_roots<TextConfig>(*ws[r], len, 0, 0);
-            ids_device[r]    = roots.ids;
-            positions[r]     = roots.positions;
-            x[r]             = roots.residual;
-            staging[r]       = ws[r]->alloc(DType::BF16, {kCfg.hidden, len});
+            const auto roots = workspace_recipe::text_prefill_roots<TextConfig>(
+                *ws[r], len, rope_axes, scatter_count);
+            ids_device[r]     = roots.ids;
+            positions[r]      = roots.positions;
+            rope_positions[r] = roots.rope_positions;
+            scatter_indices[r] = roots.scatter_indices;
+            x[r]              = roots.residual;
+            staging[r]        = ws[r]->alloc(DType::BF16, {kCfg.hidden, len});
         }
         for_each_rank(execution, [&](int rank) {
             const auto r   = static_cast<std::size_t>(rank);
             cudaStream_t s = stream_for(rank);
             copy_i32(ids.data(), ids_device[r], s);
             ops::fill_i32_positions(positions[r], base_i, s);
+            if (separate_rope) { copy_i32(rope_positions_host.data(), rope_positions[r], s); }
             ops::embedding(ids_device[r], rank == 0 ? *embed_ : *embed_peer_, x[r], s);
+            if (!local_scatter_indices.empty()) {
+                // Encode on THIS rank, into THIS rank's chunk workspace, then overwrite the
+                // placeholder token positions with the visual embeddings. Both ranks run the
+                // same kernels over the same bytes, so both residuals stay identical.
+                const VisionChunk chunk = multimodal->vision->prepare_chunk_rank(
+                    rank, prompt_t0, static_cast<std::uint32_t>(len), *ws[r]);
+                Tensor indices_device = scatter_indices[r];
+                copy_i32(local_scatter_indices.data(), indices_device, s);
+                Tensor embeddings = chunk.embeddings.slice(
+                    1, visual_begin, static_cast<std::int32_t>(local_scatter_indices.size()));
+                ops::scatter(embeddings, indices_device, x[r], s);
+            }
         });
 
         ScopedValue<const Tensor*> peer_cache(peer_cache_positions_, &positions[1]);
-        ScopedValue<const Tensor*> peer_rope(peer_rope_positions_, &positions[1]);
+        // With RoPE axes planned, the rotated positions are their own tensor per rank; without
+        // them the linear positions serve as both, exactly as before.
+        ScopedValue<const Tensor*> peer_rope(peer_rope_positions_,
+                                             separate_rope ? &rope_positions[1] : &positions[1]);
         ScopedValue<const Tensor*> peer_rows(peer_kv_table_rows_,
                                              &tp_->io->text_kv_table_row);
         ScopedPositions scoped_cache(active_cache_positions_, positions[0]);
-        ScopedPositions scoped_rope(active_rope_positions_, positions[0]);
+        ScopedPositions scoped_rope(active_rope_positions_,
+                                    separate_rope ? rope_positions[0] : positions[0]);
         const auto visible = static_cast<std::uint32_t>(base_i + len);
         const ops::GqaExecutionEnvelope chunk_envelope{visible, visible};
         ScopedEnvelope scoped_envelope(active_gqa_envelope_, chunk_envelope);

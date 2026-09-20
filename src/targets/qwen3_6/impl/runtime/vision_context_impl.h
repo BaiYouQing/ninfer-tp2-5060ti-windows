@@ -309,24 +309,44 @@ void VisionContext::encode(const VisionItemView& item, Tensor& output,
     ops::add_bias(*merger_.fc2_bias, output, stream);
 }
 
-VisionPrefillSession::VisionPrefillSession(DeviceContext& device, const LoadedModelData& model,
+VisionPrefillSession::VisionPrefillSession(ExecutionContext& execution,
+                                           const LoadedModelData& model,
+                                           const LoadedModelData* peer_model,
                                            WorkspaceArena& workspace,
                                            qwen3_6::PreparedPromptData& prompt,
                                            const VisionPrefillPlan& plan,
                                            runtime::TransientRegion transient)
-    : device_(device), workspace_(workspace), prompt_(prompt), plan_(plan), transient_(transient),
-      context_(device, model) {
+    : execution_(execution), workspace_(workspace), prompt_(prompt), plan_(plan),
+      transient_(transient), context_(*execution.dev[0], model) {
     if (plan_.control == nullptr || plan_.control->items.empty() || plan_.uses.empty()) {
         throw std::invalid_argument("Vision prefill plan has no suffix item spans");
     }
     if (transient_.data == nullptr || transient_.alignment < kWorkspaceAlignment) {
         throw std::invalid_argument("Vision item output transient is missing or misaligned");
     }
+    if (execution.tp == 2) {
+        // Rank 1's tower. The view is replicated, so this binds rank 1's own full copy -- the
+        // per-device materialization in the 27b loader is what makes this valid rather than a
+        // pair of aliases into rank 0's arena.
+        if (peer_model == nullptr) {
+            throw std::invalid_argument("tp2 vision session was built without a peer view");
+        }
+        peer_context_.emplace(*execution.dev[1], *peer_model);
+    }
     encoded_payloads_pending_release_.reserve(plan_.uses.size());
     timers_.reserve(plan_.uses.size());
 }
 
-VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin, std::uint32_t nominal_length) {
+VisionContext& VisionPrefillSession::context_for(int rank) {
+    if (rank == 0) { return context_; }
+    if (!peer_context_) {
+        throw std::logic_error("rank 1 vision context was requested at a single-device width");
+    }
+    return *peer_context_;
+}
+
+VisionPrefillSession::ResolvedChunk VisionPrefillSession::resolve_chunk(
+    std::uint32_t begin, std::uint32_t nominal_length) const {
     if (nominal_length == 0 || begin >= prompt_.token_ids.size()) {
         throw std::invalid_argument("Vision chunk range is empty or outside the prompt");
     }
@@ -348,7 +368,7 @@ VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin, std::uint32
     }
     if (end <= begin) { throw std::logic_error("Vision chunk cap made no forward progress"); }
     if (active == nullptr) {
-        return VisionChunk{static_cast<std::int32_t>(end - begin), nullptr, {}};
+        return ResolvedChunk{static_cast<std::int32_t>(end - begin), nullptr, 0};
     }
     if (active->item_index >= plan_.control->items.size() ||
         active->item_index >= prompt_.vision_items.size() ||
@@ -365,6 +385,22 @@ VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin, std::uint32
     if (control.merged_count > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::overflow_error("Vision item output columns exceed int32");
     }
+    return ResolvedChunk{static_cast<std::int32_t>(end - begin), &control, active->item_index};
+}
+
+VisionPrefillSession::ChunkPlan VisionPrefillSession::plan_chunk(
+    std::uint32_t begin, std::uint32_t nominal_length) const {
+    const ResolvedChunk resolved = resolve_chunk(begin, nominal_length);
+    return ChunkPlan{resolved.length, resolved.control};
+}
+
+VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin,
+                                               std::uint32_t nominal_length) {
+    const ResolvedChunk resolved = resolve_chunk(begin, nominal_length);
+    if (resolved.control == nullptr) {
+        return VisionChunk{resolved.length, nullptr, {}};
+    }
+    const qwen3_6::VisionItemControl& control = *resolved.control;
     const std::size_t output_bytes =
         checked_mul(checked_mul(static_cast<std::size_t>(VisionScheduleConfig::out_hidden),
                                 control.merged_count, "item output elements"),
@@ -376,26 +412,60 @@ VisionChunk VisionPrefillSession::prepare_chunk(std::uint32_t begin, std::uint32
         transient_.data, DType::BF16,
         {VisionScheduleConfig::out_hidden, static_cast<std::int32_t>(control.merged_count)});
 
-    if (!active_item_ || *active_item_ != active->item_index) {
-        if (active_item_ && active->item_index <= *active_item_) {
+    if (!active_item_ || *active_item_ != resolved.item_index) {
+        if (active_item_ && resolved.item_index <= *active_item_) {
             throw std::logic_error("Vision items are not consumed in strictly increasing order");
         }
         const std::size_t patch_elements = checked_mul(
             control.patch_count, static_cast<std::size_t>(VisionScheduleConfig::patch_dim),
             "item patch elements");
-        const auto& payload = prompt_.media_payloads[active->item_index];
+        const auto& payload = prompt_.media_payloads[resolved.item_index];
         if (!payload || payload->patch_elements != patch_elements) {
             throw std::invalid_argument("Vision item patch payload has an invalid shape");
         }
-        timers_.emplace_back(device_);
+        timers_.emplace_back(*execution_.dev[0]);
         timers_.back().start();
         context_.encode(VisionItemView{payload->span(), &control}, output, workspace_);
         timers_.back().record_stop();
         workspace_.reset();
-        active_item_ = active->item_index;
-        encoded_payloads_pending_release_.push_back(active->item_index);
+        active_item_ = resolved.item_index;
+        encoded_payloads_pending_release_.push_back(resolved.item_index);
     }
-    return VisionChunk{static_cast<std::int32_t>(end - begin), &control, output};
+    return VisionChunk{resolved.length, &control, output};
+}
+
+VisionChunk VisionPrefillSession::prepare_chunk_rank(int rank, std::uint32_t begin,
+                                                    std::uint32_t nominal_length,
+                                                    WorkspaceArena& arena) {
+    const ResolvedChunk resolved = resolve_chunk(begin, nominal_length);
+    if (resolved.control == nullptr) {
+        return VisionChunk{resolved.length, nullptr, {}};
+    }
+    const qwen3_6::VisionItemControl& control = *resolved.control;
+    const std::size_t patch_elements =
+        checked_mul(control.patch_count, static_cast<std::size_t>(VisionScheduleConfig::patch_dim),
+                    "item patch elements");
+    const auto& payload = prompt_.media_payloads[resolved.item_index];
+    if (!payload || payload->patch_elements != patch_elements) {
+        throw std::invalid_argument("Vision item patch payload has an invalid shape");
+    }
+    // The embedding buffer is this rank's, in this chunk's scope: it must outlive the encode's
+    // own scratch, so it is allocated BEFORE the inner scope that the encode releases.
+    Tensor output = arena.alloc(
+        DType::BF16,
+        {VisionScheduleConfig::out_hidden, static_cast<std::int32_t>(control.merged_count)});
+    {
+        auto scratch = arena.scope();
+        if (rank == 0) {
+            timers_.emplace_back(*execution_.dev[0]);
+            timers_.back().start();
+            context_for(rank).encode(VisionItemView{payload->span(), &control}, output, arena);
+            timers_.back().record_stop();
+        } else {
+            context_for(rank).encode(VisionItemView{payload->span(), &control}, output, arena);
+        }
+    }
+    return VisionChunk{resolved.length, &control, output};
 }
 
 void VisionPrefillSession::release_encoded_media_payloads() noexcept {

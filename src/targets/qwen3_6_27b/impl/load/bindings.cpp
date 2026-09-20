@@ -541,6 +541,25 @@ ShardMapping shard_mapping(std::string_view object, int tp, const TextConfig& co
     const auto by_columns = [](ShardPlan&& shards) {
         return ShardMapping{artifact::ShardAxis::Columns, std::move(shards)};
     };
+    const auto starts = [&](std::string_view prefix) {
+        return object.size() >= prefix.size() && object.compare(0, prefix.size(), prefix) == 0;
+    };
+
+    // Vision tower: REPLICATED, not sharded.
+    //
+    // The vision encoder composes whole-tensor ops only (linear / add_bias / layer_norm / rope /
+    // vision_attention / vision_pos_embed / gelu / residual_add), so sharding it would need a
+    // split-aware forward for every one of those families plus the allreduce/allgather plumbing
+    // between them. That is not worth it here: the quantized backbone is ~280 MiB -- 27 layers of
+    // Q4G64 qkv + Q5G64 output + Q4G64 fc1 + Q5G64 fc2, plus a Q8G32 merger and the BF16 position
+    // table -- against ~8.66 GiB of text weights per device. A full copy per device therefore
+    // costs about 3% of what the text stack already costs, while the shard map it replaces would
+    // save at most half of that. Replication also removes the cross-rank handoff entirely: each
+    // rank encodes its own chunk from its own copy, so the result is bit-identical to tp1.
+    //
+    // Matched by prefix because the artifact keeps the tower in its own top-level namespace
+    // (vision/patch_embedding, vision/layers/<n>/..., vision/merger/...), parallel to text/.
+    if (starts("vision/")) { return {}; }
 
     // Replicated: full copy on every device (shards stays empty).
     //
@@ -844,11 +863,6 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
                                     std::to_string(tp));
     }
     if (tp > 1) {
-        if (features.vision) {
-            // The vision tower is out of scope for TP2 and has no shard map, so reject here
-            // rather than silently replicating a 4.6 GB backbone onto both devices.
-            throw std::invalid_argument("qwen3_6_27b: vision is not supported with tp > 1");
-        }
         const TextConfig config{};
         binder.set_shard_resolver([config, tp](std::string_view name) {
             return shard_placement(name, tp, config);
@@ -1078,17 +1092,21 @@ void LoadedModelData::build_device_view(const BindingPlan& plan, int device,
     }
 
     if (plan.features.vision) {
-        if (tp != 1) {
-            throw std::invalid_argument(
-                "qwen3_6_27b: Vision has no tensor-parallel forward path yet");
-        }
+        // `device` is REQUIRED here, not optional: the tower is a replicated placement (see
+        // shard_mapping above), so each device's arena holds its own full copy and this view must
+        // bind into it. The default of 0 is only correct at tp1 -- at tp2 it would silently point
+        // rank 1's view at rank 0's arena, which the byte guard cannot catch because a replicated
+        // placement legitimately holds the whole object.
         auto& vision  = runtime.vision.emplace();
         vision.common = qwen3_6::materialize_vision_common(
-            backing, plan.vision_backbone, plan.vision_merger_input, plan.vision_merger_norm);
-        vision.merger_fc2      = artifact::materialized_weight(backing, plan.vision_merger_fc2,
-                                                               NumericFormat::W8G32_F16S, 5120, 4608);
-        vision.merger_fc2_bias = artifact::materialized_tensor(backing, plan.vision_merger_fc2_bias,
-                                                               NumericFormat::BF16, {5120});
+            backing, plan.vision_backbone, plan.vision_merger_input, plan.vision_merger_norm,
+            device);
+        vision.merger_fc2 = artifact::materialized_weight(backing, plan.vision_merger_fc2,
+                                                          NumericFormat::W8G32_F16S, 5120, 4608,
+                                                          device);
+        vision.merger_fc2_bias =
+            artifact::materialized_tensor(backing, plan.vision_merger_fc2_bias, NumericFormat::BF16,
+                                          {5120}, device);
     }
 }
 

@@ -23,6 +23,19 @@ void run_prepared(Context& state, DecodeGraphExecutable* executable, Body&& body
             // rank 1's own stream and is therefore automatically ordered after the round's
             // mirrored KV page materialization; a graph launched on rank 0's stream is not.
             peer.graph_bridge->gate_launch(peer.device->stream, state.execution.device.stream);
+            // Mailbox exchange protocol, host half. The previous round is fully retired here
+            // (the caller synchronized both devices to read its egress before asking for the
+            // next round), so its aggregate hang-guard word is final: a nonzero word means a
+            // mailbox poller gave up on its peer on the last round -- the output was already
+            // corrupt, and replaying more rounds on a wedged exchange would only hide it.
+            // Then, with the fault state clean, clear every slot's release flag so this
+            // replay's publish/consume handshake starts from zero: plain stores to the pinned
+            // WB words are coherent with the GPUs' PCIe view, and no kernel is running.
+            if (ops::PeerMailbox::hang_reported()) {
+                throw std::logic_error(
+                    "TP2 mailbox exchange timed out waiting for the peer device");
+            }
+            ops::PeerMailbox::reset_host_flags();
         }
         executable->launch(state.execution.device.stream);
     } else {

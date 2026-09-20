@@ -481,8 +481,12 @@ private:
                  const MultimodalPrefill* multimodal, Tap& tap, bool finalize_at_end);
     // The tp2 text prefill. Declared here rather than beside its siblings above because it names
     // TextPrefill, which is declared just above this line.
+    // `multimodal` is non-null only for a media-bearing chunk. Each rank encodes its own copy of
+    // the item and scatters the visual embeddings into its own residual, so the tp2 path needs no
+    // collective of its own and the two ranks stay bit-identical.
     [[nodiscard]] PrefillChunkResult prefill_impl_tp2(std::span<const int> ids,
                                                       const TextPrefill& text_prefill,
+                                                      const MultimodalPrefill* multimodal,
                                                       bool finalize_at_end);
     DeviceContext& ctx_;
     const LoadedModelData& weights_;

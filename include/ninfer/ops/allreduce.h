@@ -83,6 +83,8 @@
 
 namespace ninfer::ops {
 
+class PeerMailbox;  // see ops/peer_mailbox.h; forward-declared to keep this header's includes as-is
+
 // Probes cudaDeviceCanAccessPeer in both directions and enables peer access on both devices only
 // when both directions report support; a device that already had peer access enabled is left
 // alone. Returns true when direct P2P is active for the pair, false when the driver denies it and
@@ -92,6 +94,15 @@ namespace ninfer::ops {
 // Call once during setup. cudaDeviceEnablePeerAccess is a context-level operation, not
 // stream-ordered and not graph-capturable; it must never appear in a hot path.
 bool enable_peer_access(const ExecutionContext& ec);
+
+namespace detail {
+// Chooses the mailbox transport for this collective when every predicate holds: environment
+// override on, a mailbox installed for this exact device pair, THIS call inside a stream capture,
+// and the payload within a slot. Returns the live mailbox, or null for the staged path. Defined
+// in allreduce.cu; the pointer is mutable because claiming a capture slot is a mutating claim.
+[[nodiscard]] PeerMailbox* mailbox_transport(const ExecutionContext& ec, std::size_t bytes,
+                                             cudaStream_t stream);
+}  // namespace detail
 
 // The reusable cross-device ordering events: two per device, created on that device with timing
 // disabled.

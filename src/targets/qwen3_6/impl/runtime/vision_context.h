@@ -91,21 +91,66 @@ struct VisionChunk {
 
 class VisionPrefillSession {
 public:
-    VisionPrefillSession(DeviceContext& device, const LoadedModelData& model,
-                         WorkspaceArena& workspace, qwen3_6::PreparedPromptData& prompt,
-                         const VisionPrefillPlan& plan, runtime::TransientRegion transient);
+    // `model` is rank 0's view and `peer_model` rank 1's (null at tp1). They are separate
+    // arguments because in this runtime a LoadedModelData IS one rank's view -- the loader's
+    // two-view container lives one layer up, in the target's LoadedModelData.
+    VisionPrefillSession(ExecutionContext& execution, const LoadedModelData& model,
+                         const LoadedModelData* peer_model, WorkspaceArena& workspace,
+                         qwen3_6::PreparedPromptData& prompt, const VisionPrefillPlan& plan,
+                         runtime::TransientRegion transient);
 
     [[nodiscard]] VisionChunk prepare_chunk(std::uint32_t begin, std::uint32_t nominal_length);
+
+    // Host-only resolution: how far this chunk may run and which item it falls in. No device
+    // work, no allocation. The tp2 path needs the length BEFORE it lays out the workspace roots
+    // and opens its nvtx range, while the encode itself has to happen after work_.reset().
+    struct ChunkPlan {
+        std::int32_t length                       = 0;
+        const qwen3_6::VisionItemControl* control = nullptr;
+    };
+    [[nodiscard]] ChunkPlan plan_chunk(std::uint32_t begin,
+                                       std::uint32_t nominal_length) const;
+
+    // tp2 entry point.
+    //
+    // Same host-side span resolution as prepare_chunk(), but the encode runs on `rank` against
+    // that rank's own full copy of the tower and into `arena` -- the caller's per-chunk,
+    // per-rank prefill workspace. Consequently this path keeps NO request-scoped transient: the
+    // embedding buffer lives exactly as long as the chunk that asked for it. An item spanning
+    // several chunks is re-encoded once per chunk, which is deterministic and lands on the same
+    // bytes on both ranks; the alternative (a second request transient on rank 1) would have to
+    // be threaded through the executor's activation protocol for at most ~80 MiB.
+    //
+    // The returned embeddings are retired by the arena, not by release_encoded_media_payloads(),
+    // which is why this path does not register items there: the prepared prompt owns its media
+    // payloads for the request's lifetime, and re-encoding a later chunk needs them still alive.
+    [[nodiscard]] VisionChunk prepare_chunk_rank(int rank, std::uint32_t begin,
+                                                 std::uint32_t nominal_length,
+                                                 WorkspaceArena& arena);
+
     void release_encoded_media_payloads() noexcept;
     [[nodiscard]] double elapsed_seconds() const;
 
 private:
-    DeviceContext& device_;
+    // Host half shared by both entry points: which item this chunk covers, how far the chunk may
+    // run, and where that item lives in the prompt. Rank-independent and side-effect free.
+    struct ResolvedChunk {
+        std::int32_t length                       = 0;
+        const qwen3_6::VisionItemControl* control = nullptr;
+        std::size_t item_index                    = 0;
+    };
+    [[nodiscard]] ResolvedChunk resolve_chunk(std::uint32_t begin,
+                                              std::uint32_t nominal_length) const;
+    [[nodiscard]] VisionContext& context_for(int rank);
+
+    ExecutionContext& execution_;
     WorkspaceArena& workspace_;
     qwen3_6::PreparedPromptData& prompt_;
     const VisionPrefillPlan& plan_;
     runtime::TransientRegion transient_;
     VisionContext context_;
+    // Rank 1's tower, materialized only at tp2 (the view is REPLICATED there).
+    std::optional<VisionContext> peer_context_;
     std::optional<std::uint32_t> active_item_;
     std::vector<std::uint32_t> encoded_payloads_pending_release_;
     std::vector<CudaEventTimer> timers_;

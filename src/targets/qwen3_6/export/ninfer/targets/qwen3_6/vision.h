@@ -99,8 +99,11 @@ struct VisionWeights {
 [[nodiscard]] VisionMergerNormPlan bind_vision_merger_norm(artifact::Binder& binder,
                                                            artifact::TensorPlacement placement);
 
+// `device` selects WHICH device's arena the returned tensors point into. The tp2 tower is a
+// replicated placement, so each device's view binds its own copy; `0` remains the tp1 default.
 [[nodiscard]] VisionCommonWeights materialize_vision_common(
     const artifact::MaterializedArtifact& materialized, const VisionBackbonePlan& backbone,
-    const VisionMergerInputPlan& merger_input, const VisionMergerNormPlan& merger_norm);
+    const VisionMergerInputPlan& merger_input, const VisionMergerNormPlan& merger_norm,
+    int device = 0);
 
 } // namespace ninfer::targets::qwen3_6

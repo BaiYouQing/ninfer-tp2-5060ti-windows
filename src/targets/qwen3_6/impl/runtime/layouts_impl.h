@@ -600,9 +600,20 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     }
 
     if (plan.features.vision) {
-        constexpr std::uint32_t kFrontendMergedLimit  = 32768;
-        constexpr std::uint32_t kFrontendSegmentLimit = 768 / 2;
-        const std::uint32_t merged = std::min(plan.capacity, kFrontendMergedLimit);
+        // Planning envelope for the vision encode phase. The frontend accepts an aggregate of at
+        // most 32768 merged tokens across at most 384 segments (768/2), and planning the encode
+        // workspace for all of them costs ~4.86 GB. tp1 absorbs that; tp2 cannot, because the text
+        // stack already holds ~8.66 GiB per device and the KV pool is sized from what is left, so
+        // tp2 plans the smaller envelope: 8192 merged tokens is ~1.21 GB and still covers a single
+        // ~8k-token image, far past a product photo. This is a CAPACITY, not a filter -- a request
+        // past the planned envelope is rejected loudly by VisionContext::encode's workspace
+        // capacity check, never silently truncated.
+        constexpr std::uint32_t kFrontendMergedLimitTp1  = 32768;
+        constexpr std::uint32_t kFrontendMergedLimitTp2  = 4096;
+        constexpr std::uint32_t kFrontendSegmentLimit    = 768 / 2;
+        const std::uint32_t merged_limit =
+            plan.tp == 2 ? kFrontendMergedLimitTp2 : kFrontendMergedLimitTp1;
+        const std::uint32_t merged = std::min(plan.capacity, merged_limit);
         out.vision_encode          = schedule::VisionContext::workspace_capacity_bytes(
             merged, std::min(merged, kFrontendSegmentLimit));
     }
@@ -686,16 +697,15 @@ std::uint32_t validate_target_options(DeviceContext& device, const EngineOptions
         // MTP is split-aware (sharded stem/attention/post-mixer, sharded draft head with an
         // allgather before the proposal argmax, per-device GDN replay records and per-device
         // replay fold). DFlash is NOT: its weights are sharded by the load plan but
-        // its forward path composes plain linear/residual_add over whole-width tensors, and the
-        // Vision encoder runs entirely on device 0. Engine rejects both combinations too (its
-        // guard is the authority for callers that never reach a target); this is the
-        // target-layer statement of the same fact.
+        // its forward path composes plain linear/residual_add over whole-width tensors. Engine
+        // rejects that combination too (its guard is the authority for callers that never reach a
+        // target); this is the target-layer statement of the same fact.
+        //
+        // Vision IS tp2-capable: its tower is REPLICATED rather than sharded (shard_mapping in the
+        // 27b load bindings), so each rank encodes its own chunk against its own full copy.
         if (options.speculative.backend == SpeculativeBackend::DFlash) {
             throw std::invalid_argument("--tp 2 does not support the DFlash speculative backend "
                                         "in this build; use --tp 1, --spec mtp or --spec none");
-        }
-        if (options.enable_vision) {
-            throw std::invalid_argument("--tp 2 does not support Vision in this build");
         }
     }
     if (device.sm() != 120) {
@@ -755,8 +765,13 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
     if (impl->features.vision) {
-        constexpr std::uint32_t kFrontendMergedLimit = 32768;
-        const std::uint32_t merged = std::min(impl->capacity, kFrontendMergedLimit);
+        // Kept in step with build_workspace_plan's envelope (see the comment there): the request
+        // transient must cover the same widest item the encode workspace is planned for.
+        constexpr std::uint32_t kFrontendMergedLimitTp1 = 32768;
+        constexpr std::uint32_t kFrontendMergedLimitTp2 = 4096;
+        const std::uint32_t merged_limit =
+            impl->tp == 2 ? kFrontendMergedLimitTp2 : kFrontendMergedLimitTp1;
+        const std::uint32_t merged = std::min(impl->capacity, merged_limit);
         impl->request_transient_capacity_bytes =
             schedule::VisionContext::output_transient_bytes(merged);
     }
@@ -787,7 +802,11 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             // budget there is one multiplier, 20 MiB, against a 0.3b-style worst case of ~19.9
             // MiB: roughly 1 MiB of headroom. Raising this multiplier, not the warm pass, is the
             // lever if that transient is ever observed at tp 2.
-            const std::uint64_t per_batch = impl->tp == 2 ? 20ULL * kMiB : 12ULL * kMiB;
+            // 20 -> 32 MiB at tp2: vision adds nodes to the same cross-device graph (the per-rank
+            // encode and scatter are part of the captured prefill family), and 24.2 MB was observed
+            // against the old 20 MiB allowance the first time tp2 vision actually ran. This is the
+            // lever the comment above names -- raising the multiplier, not the warm pass.
+            const std::uint64_t per_batch = impl->tp == 2 ? 32ULL * kMiB : 12ULL * kMiB;
             impl->graph_allowance_bytes =
                 checked_mul(per_batch, impl->max_concurrency, "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {

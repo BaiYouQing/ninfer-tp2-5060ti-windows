@@ -48,3 +48,7 @@ profiles/
 .claude/settings.local.json
 .local/
 *.posix-orig
+*.bak-*
+*.bak
+build-win-*/
+_hdr.txt

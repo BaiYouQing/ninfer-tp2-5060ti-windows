@@ -22,7 +22,9 @@
 // is issued on, and the ordering proof are unchanged by that choice: it is the same transfer
 // expressed through the API that CUDA graph capture accepts.
 #include "ninfer/ops/allreduce.h"
+#include "ninfer/ops/peer_mailbox.h"
 
+#include "ops/kernel/peer_exchange.cuh" // detail::peer_exchange_sum_kernel
 #include "ops/launcher/residual_add.h" // detail::residual_add_launch
 
 #include <cstddef>
@@ -32,6 +34,40 @@
 #include <string>
 
 namespace ninfer::ops {
+
+// MAILBOX TRANSPORT SELECTION. Returns the installed mailbox when every predicate holds:
+//
+//   * a PeerMailbox is installed for THIS ExecutionContext (Program setup created one);
+//   * NINFER_TP2_MAILBOX is not "0"/"false" (the A/B escape hatch);
+//   * the caller's stream is CAPTURING -- this collective is being recorded into a decode CUDA
+//     graph, not issued eagerly (a prefill chunk, a warmup pass, or a --no-cuda-graph run),
+//     because the mailbox's flag-reset protocol has a host reset point only between graph
+//     replays, and eager calls would leave flags dirty for the next capture;
+//   * the payload fits one slot and covers whole 16-byte vectors (staging beats zero-copy for
+//     prefill-sized megabyte payloads; vector granularity is the exchange kernel's contract).
+//
+// Every predicate the mailbox fails is a collective that runs the staged path below, unchanged.
+namespace detail {
+
+PeerMailbox* mailbox_transport(const ExecutionContext& ec, std::size_t bytes,
+                               cudaStream_t stream) {
+    if (!PeerMailbox::enabled_by_environment()) { return nullptr; }
+    PeerMailbox* mailbox = PeerMailbox::installed(ec);
+    if (mailbox == nullptr) { return nullptr; }
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &status) != cudaSuccess) { return nullptr; }
+    if (status == cudaStreamCaptureStatusNone) { return nullptr; }
+    if ((bytes % 16) != 0) { return nullptr; }
+    if (bytes > mailbox->slot_bytes()) { return nullptr; }
+    // The remaining predicate needs a slot: only a fresh, unclaimed slot makes this captured
+    // call site exchange through the mailbox. A claim is permanent for the Program's lifetime,
+    // which is exactly the captured-call-site identity the flag protocol needs; an exhausted
+    // slab (null slot) is reported by the caller so the sizing mistake is visible.
+    return mailbox;
+}
+
+} // namespace detail
+
 namespace {
 
 void require(bool condition, const char* message) {
@@ -221,6 +257,33 @@ void allreduce_sum(const std::array<Tensor, 2>& buffer, const std::array<Tensor,
 #endif
 
     const CurrentDeviceGuard guard;
+
+    // MAILBOX TRANSPORT. When every predicate in mailbox_transport() holds, this collective
+    // becomes one kernel per device: both ranks publish their partial into their own pinned host
+    // slot, release a flag, spin on the peer's flag, and combine locally -- no events, no copy
+    // engine, no driver round trip. The two kernels' arithmetic is the same qualified combine
+    // as residual_add_launch below, so the observable result is identical bit for bit.
+    PeerMailbox* mailbox  = detail::mailbox_transport(ec, bytes, ec.dev[0]->stream);
+    int slot              = -1;
+    if (mailbox != nullptr) { slot = mailbox->take_capture_slot(); }
+    if (slot >= 0) {
+        const int vecs   = static_cast<int>(bytes / sizeof(detail::PeerVec));
+        const int blocks = detail::peer_exchange_blocks(static_cast<int>(bytes));
+        for (int rank = 0; rank < 2; ++rank) {
+            const DeviceContext& local = *ec.dev[rank];
+            CurrentDeviceGuard::set(local.device);
+            detail::peer_exchange_sum_kernel<<<blocks, 256, 0, local.stream>>>(
+                reinterpret_cast<detail::PeerVecBf16*>(buffer[rank].data),
+                reinterpret_cast<detail::PeerVecBf16*>(buffer[rank].data),
+                reinterpret_cast<detail::PeerVecBf16*>(mailbox->payload(rank, slot)),
+                mailbox->flag(rank, slot),
+                reinterpret_cast<const detail::PeerVecBf16*>(mailbox->payload(1 - rank, slot)),
+                mailbox->flag(1 - rank, slot), mailbox->arrival(rank) + slot,
+                mailbox->hang_word(), vecs);
+            CUDA_CHECK(cudaGetLastError());
+        }
+        return;
+    }
 
     // Phase A: publish "my operand is complete" on each stream, before any wait observes it.
     for (int rank = 0; rank < 2; ++rank) {
