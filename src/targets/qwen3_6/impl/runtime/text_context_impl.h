@@ -2182,11 +2182,20 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
             {
                 const CurrentDevice restore;
                 CUDA_CHECK(cudaSetDevice(ctx_.device));
+                std::fprintf(stderr,
+                             "[PTRACE] mtp-align vis=%d alignment_tokens=%u shift_begin=%u "
+                             "gen_final=%d len=%d\n",
+                             multimodal != nullptr ? 1 : 0,
+                             static_cast<unsigned>(alignment_tokens),
+                             static_cast<unsigned>(mtp_window.shifted_embedding_begin),
+                             mtp_window.final_column_uses_generated_token ? 1 : 0, len);
                 if (mtp_window.final_column_uses_generated_token) {
                     int next_token = 0;
                     CUDA_CHECK(cudaStreamSynchronize(ctx_.stream));
                     CUDA_CHECK(cudaMemcpy(&next_token, io_.token.data, sizeof(next_token),
                                           cudaMemcpyDeviceToHost));
+                    std::fprintf(stderr, "[PTRACE] mtp-align seeded_final=%d vis=%d\n",
+                                 next_token, multimodal != nullptr ? 1 : 0);
                     mtp_ids_host[static_cast<std::size_t>(len - 1)] = next_token;
                 }
                 copy_i32(mtp_ids_host.data(), mtp_ids, ctx_.stream);
