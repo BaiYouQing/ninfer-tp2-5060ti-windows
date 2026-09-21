@@ -2057,6 +2057,18 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
     {
         auto scope_0 = work_.scope();
         auto scope_1 = tp_->work->scope();
+        // The vision encode allocates its image-embedding buffers from rank 0's chunk arena,
+        // and that arena's plan reserves them FIRST -- which is why the qualified TP2 multimodal
+        // path calls prepare_chunk before text_prefill_roots. Encoding after the roots makes those
+        // buffers land on the same bytes the roots handed out, which overwrites rank 0's
+        // cache-position tensor; the KV append addresses pages purely from those positions, so
+        // rank 0 then leaves stale rows in pages this request never wrote and the model answers
+        // the previous conversation. Encode first, scatter later.
+        VisionChunk vision_chunk;
+        if (multimodal != nullptr && !local_scatter_indices.empty()) {
+            vision_chunk = multimodal->vision->prepare_chunk_rank(
+                0, prompt_t0, static_cast<std::uint32_t>(len), *ws[0]);
+        }
         std::array<Tensor, 2> ids_device;
         std::array<Tensor, 2> positions;
         std::array<Tensor, 2> rope_positions;
@@ -2081,20 +2093,14 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
             if (separate_rope) { copy_i32(rope_positions_host.data(), rope_positions[r], s); }
             ops::embedding(ids_device[r], rank == 0 ? *embed_ : *embed_peer_, x[r], s);
         });
-        // Hoisted out of the scatter block: the MTP prompt alignment below needs the same
-        // Vision chunk and its embeddings, exactly as the qualified TP2 multimodal path keeps
-        // them at function scope. Its output lives in this chunk's arena, which is still open.
-        VisionChunk vision_chunk;
+        // Reference arrangement, taken from the qualified TP2 multimodal path: the vision tower
+        // (already encoded above, before the roots) produced the image columns on rank 0, they
+        // replace the placeholder positions in rank 0's residual, and the finished language-model
+        // input is then mirrored to the peer with ONE device-to-device copy over UVA. Producing
+        // rank 1's residual with a second encode instead makes each rank's input the product of an
+        // independent evaluation; the moment those two diverge, the two halves of the model read
+        // different contexts and the request answers the wrong conversation.
         if (multimodal != nullptr && !local_scatter_indices.empty()) {
-            // Reference arrangement, taken from the qualified TP2 multimodal path: the vision
-            // tower produces the image columns on rank 0, they replace the placeholder positions
-            // in rank 0's residual, and the finished language-model input is then mirrored to the
-            // peer with ONE device-to-device copy over UVA. Producing rank 1's residual with a
-            // second encode instead makes each rank's input the product of an independent
-            // evaluation; the moment those two diverge, the two halves of the model read
-            // different contexts and the request answers the wrong conversation.
-            vision_chunk = multimodal->vision->prepare_chunk_rank(
-                0, prompt_t0, static_cast<std::uint32_t>(len), *ws[0]);
             Tensor indices_device = scatter_indices[0];
             copy_i32(local_scatter_indices.data(), indices_device, ctx_.stream);
             Tensor embeddings = vision_chunk.embeddings.slice(
@@ -2182,20 +2188,11 @@ PrefillChunkResult TextContext::prefill_impl_tp2(std::span<const int> ids,
             {
                 const CurrentDevice restore;
                 CUDA_CHECK(cudaSetDevice(ctx_.device));
-                std::fprintf(stderr,
-                             "[PTRACE] mtp-align vis=%d alignment_tokens=%u shift_begin=%u "
-                             "gen_final=%d len=%d\n",
-                             multimodal != nullptr ? 1 : 0,
-                             static_cast<unsigned>(alignment_tokens),
-                             static_cast<unsigned>(mtp_window.shifted_embedding_begin),
-                             mtp_window.final_column_uses_generated_token ? 1 : 0, len);
                 if (mtp_window.final_column_uses_generated_token) {
                     int next_token = 0;
                     CUDA_CHECK(cudaStreamSynchronize(ctx_.stream));
                     CUDA_CHECK(cudaMemcpy(&next_token, io_.token.data, sizeof(next_token),
                                           cudaMemcpyDeviceToHost));
-                    std::fprintf(stderr, "[PTRACE] mtp-align seeded_final=%d vis=%d\n",
-                                 next_token, multimodal != nullptr ? 1 : 0);
                     mtp_ids_host[static_cast<std::size_t>(len - 1)] = next_token;
                 }
                 copy_i32(mtp_ids_host.data(), mtp_ids, ctx_.stream);
