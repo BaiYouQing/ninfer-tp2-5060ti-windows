@@ -817,6 +817,25 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
         };
         request.prefill.emplace(std::move(prefill));
         auto& staged = *request.prefill;
+        {
+            const long long bound =
+                sequence.kv && sequence.kv->backend
+                    ? static_cast<long long>(sequence.kv->backend->bound_row())
+                    : -1LL;
+            std::fprintf(stderr,
+                         "[PTRACE] new-req prompt=%u base=%u cursor=%u reuse=%d "
+                         "visplan=%d prep_mtp=%d mpbridge=%d kv_valid=%u mtp_valid=%u "
+                         "ledger=%zu rope_delta=%d bound_row=%lld\n",
+                         static_cast<unsigned>(staged.prompt_tokens),
+                         static_cast<unsigned>(staged.base),
+                         static_cast<unsigned>(staged.cursor),
+                         static_cast<int>(staged.reuse), staged.vision_plan ? 1 : 0,
+                         staged.prepare_mtp ? 1 : 0,
+                         static_cast<int>(staged.mtp_bridge),
+                         static_cast<unsigned>(sequence.text_kv_valid),
+                         static_cast<unsigned>(sequence.mtp_kv_valid),
+                         sequence.ledger.size(), static_cast<int>(sequence.rope_delta), bound);
+        }
         if (staged.vision_plan) {
             staged.vision = std::make_unique<schedule::VisionPrefillSession>(
                 execution, model, peer ? &peer->model : nullptr, work, staged.prompt,
@@ -1233,6 +1252,24 @@ void ProgramImplCore::bind_sequence_kv(SequenceState& sequence) {
             }
             set_peer_i32(peer->io.backend_kv_table_row,
                          sequence.kv->backend_peer ? sequence.kv->backend_peer->bound_row() : 0);
+            // [KVPROBE] both ranks' allocations, side by side, at the moment they are bound.
+            {
+                const PagedKVAllocation& t = sequence.kv->text;
+                const PagedKVAllocation& p = *sequence.kv->text_peer;
+                std::fprintf(stderr,
+                             "[KVPROBE] lane=%d row t=%d p=%d | t valid=%d pages=%u/%u tok=%u "
+                             "ids=%zu | p valid=%d pages=%u/%u tok=%u ids=%zu\n",
+                             sequence.lane, t.bound_row(), p.bound_row(), t.valid() ? 1 : 0,
+                             t.mapped_page_count(), t.page_entitlement(),
+                             t.mapped_token_capacity(), t.page_ids().size(), p.valid() ? 1 : 0,
+                             p.mapped_page_count(), p.page_entitlement(),
+                             p.mapped_token_capacity(), p.page_ids().size());
+                std::fprintf(stderr, "[KVPROBE]   t ids:");
+                for (const auto id : t.page_ids()) { std::fprintf(stderr, " %d", id); }
+                std::fprintf(stderr, "\n[KVPROBE]   p ids:");
+                for (const auto id : p.page_ids()) { std::fprintf(stderr, " %d", id); }
+                std::fprintf(stderr, "\n");
+            }
         }
         set_device_i32(io.text_kv_table_row, sequence.kv->text.bound_row());
         set_device_i32(io.backend_kv_table_row,
@@ -1350,12 +1387,30 @@ void ProgramImplCore::ordered_reset(SequenceState& sequence) {
         set_peer_i32(peer->io.pos, 0);
         set_peer_i32(peer->io.rope_pos, 0);
         set_peer_i32(peer->io.rope_delta, 0);
+        // `io.token` carries the last sampled token, and the MTP prompt alignment reads it
+        // as the token generated at the final column. A fresh request has sampled nothing, so
+        // leaving the previous request's token here seeds this one with the last request.
+        set_peer_i32(peer->io.token, 0);
+        if (peer->io.mtp) {
+            set_peer_i32(peer->io.mtp->position, 0);
+            // The draft window is read back as proposals whenever the request's draft
+            // count is non-zero, which it is on every MTP request. Left over, a previous
+            // request's draft is eligible to be accepted and emitted as this one's answer.
+            CUDA_CHECK(cudaMemsetAsync(peer->io.mtp->draft_tokens.data, 0,
+                                       peer->io.mtp->draft_tokens.bytes(),
+                                       peer->device.stream));
+        }
     }
     work.reset();
     set_device_i32(io.pos, 0);
     set_device_i32(io.rope_pos, 0);
     set_device_i32(io.rope_delta, 0);
-    if (io.mtp) { set_device_i32(io.mtp->position, 0); }
+    set_device_i32(io.token, 0);
+    if (io.mtp) {
+        set_device_i32(io.mtp->position, 0);
+        CUDA_CHECK(cudaMemsetAsync(io.mtp->draft_tokens.data, 0,
+                                   io.mtp->draft_tokens.bytes(), device.stream));
+    }
     sequence.text_kv_valid           = 0;
     sequence.mtp_kv_valid            = 0;
     sequence.dflash_context_frontier = 0;
@@ -2219,6 +2274,13 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                 throw std::logic_error("ordinary prefill chunk made invalid progress");
             }
             processed_prompt_tokens = result.processed_tokens;
+            std::fprintf(stderr,
+                         "[PTRACE] chunk nominal=%u processed=%u cursor_before=%u vis=%d "
+                         "prompt=%u\n",
+                         static_cast<unsigned>(nominal),
+                         static_cast<unsigned>(result.processed_tokens),
+                         static_cast<unsigned>(staged.cursor), staged.vision ? 1 : 0,
+                         static_cast<unsigned>(staged.prompt_tokens));
             if (staged.vision) { staged.vision->release_encoded_media_payloads(); }
             staged.cursor += result.processed_tokens;
             sequence.text_kv_valid = staged.cursor;
@@ -2268,6 +2330,16 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
         }
 
         copy_round_token();
+        {
+            TokenId sampled = -1;
+            CUDA_CHECK(cudaMemcpy(&sampled, io.token.data, sizeof(sampled),
+                                  cudaMemcpyDeviceToHost));
+            std::fprintf(stderr,
+                         "[PTRACE] sampled=%d prompt=%u cursor=%u vis=%d\n",
+                         static_cast<int>(sampled),
+                         static_cast<unsigned>(staged.prompt_tokens),
+                         static_cast<unsigned>(staged.cursor), staged.vision ? 1 : 0);
+        }
         copy_round_logits();
         // Prefill's bonus token has now been sampled on rank 0, which is the one place rank 0's
         // penalty counters advance without rank 1's doing the same. Bring rank 1's lane level
