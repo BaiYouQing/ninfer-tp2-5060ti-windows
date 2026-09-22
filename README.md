@@ -148,8 +148,8 @@ that must speculate. Disabled capabilities cannot be enabled by a later request.
 Clone **this** repository (not upstream, and not the TP2 forks it descends from):
 
 ```bash
-git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
-cd ninfer-tp2-5060ti
+git clone https://github.com/BaiYouQing/ninfer-tp2-5060ti-windows.git
+cd ninfer-tp2-5060ti-windows
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -194,7 +194,8 @@ measured on upstream's artifacts, not on this fork's conversion.
 
 NInfer currently requires:
 
-- 64-bit Linux;
+- 64-bit Linux, or Windows 11 for the Windows port (`build.bat --arch 120a` under MSVC, with the
+  FFmpeg/curl runtime dependencies expected under `.local/deps/`);
 - two NVIDIA GeForce RTX 5060 Ti (16 GiB each), which is the platform this fork is built and
   measured on; the engine itself runs on any `sm_120a` device, one or two;
 - NVIDIA driver support for CUDA 13.1 and the CUDA Toolkit 13.1 or newer;
@@ -210,14 +211,60 @@ NInfer currently requires:
 The build rejects CUDA architectures other than `120a`. There is no install target or packaged
 binary distribution; NInfer is run from its source build tree.
 
+## Which cards run this, and what each optimization binds to
+
+One page, for deciding before you clone.
+
+**GPU compatibility.** This tree compiles for exactly one CUDA architecture, `120a` (consumer
+Blackwell). CMake rejects any other architecture list at configure time, and the gate is
+structural: the NVFP4 kernels issue the block-scaled FP4 matrix-multiply
+(`mma.sync ... kind::mxf4nvf4`, [src/ops/common/mma.cuh](src/ops/common/mma.cuh)), which only
+Blackwell tensor cores implement.
+
+| Card | Architecture | This tree |
+|---|---|---|
+| RTX 5090 / 5080 / 5070 Ti / 5070 / 5060 Ti / 5060 / 5050 | `sm_120a` | ✅ built and qualified (on 2× RTX 5060 Ti) |
+| RTX 4090 / 4080 / 4070 (Ada) | `sm_89` | ❌ no block-scaled FP4 `mma`; the NVFP4 kernels do not assemble |
+| RTX 3090 / 3080 (Ampere) | `sm_86` | ❌ same, and no FP8 at all |
+
+For 40/30 series cards the official `ninfer-xx90-win` release bundles the `86`/`89`/`120a` kernel
+sets into one binary (≈680 MB, ≈4.8× this tree's 120a-only build); this tree carries the `120a`
+set only.
+
+Single card vs two: no registered 27B artifact fits one 16 GiB card (even the W4A4 form's 16.35 GiB
+of weights does not, before runtime and KV), so 16 GiB cards need `--tp 2` across two. A single
+32 GiB RTX 5090 holds the official 20.02 GiB artifact at `--tp 1` with room left for KV;
+`--tp 2` is then optional.
+
+**What each optimization binds to.** The per-card differences are ISA, inter-card link, and memory
+capacity — not driver-level tuning:
+
+| Optimization | Binds to | Measured on 2× RTX 5060 Ti |
+|---|---|---|
+| TP2 dual-card sharding | 27B W4A4 = 16.35 GiB of weights > 16 GiB per card ⇒ dual-16-GiB is the minimum topology | per-card residency halved |
+| **PeerMailbox** pinned-host transport (default on; `NINFER_TP2_MAILBOX=0` falls back to the staged copy) | GeForce cards have no P2P (`cudaDeviceCanAccessPeer = 0`; no NVLink on 4090/5090/5060 Ti) ⇒ cross-card collectives are host-staged over PCIe; the mailbox replaces the per-copy event choreography, enabled only inside CUDA Graph capture | decode 1.53–1.60×, output bit-identical |
+| `int8` KV tier | KV residency: 2 B/element vs `k16v8`'s 3 B/element — prefill is mostly KV writes | prefill +55–58% at 80k; ~0.9 GiB more headroom at 253952 |
+| MTP speculative decoding | the checkpoint must carry an MTP head (`qwen3.8-27b` ships MTP3/MTP4); works at `--tp 2` | ~1.8× (MTP on vs off, draft-tokens 3) |
+| **Vision at `--tp 2`** | the vision tower (BF16) is `Replicated`: materialized per card, encoded on the primary card; zero vision tensors cross cards | image prompts at `--tp 2` |
+
+The driver/OS layer sets thresholds, not speed: `sm_120` needs CUDA 13.x (measured here on 13.3),
+and on Windows the WDDM per-process memory budget bounds how much a process may map.
+
+**What this repository adds.** On top of the upstream
+[lynx-gt/ninfer-tp2-5060ti](https://github.com/lynx-gt/ninfer-tp2-5060ti) line, this repository
+ships: the **Windows (MSVC) port** (`build.bat --arch 120a`, SASS-only `120a-real`), **vision at
+`--tp 2`** (rejected at startup in the upstream line), the **pinned-host peer mailbox** transport,
+and the **TP2 multimodal fix** that keeps a later multimodal request in the same engine from
+reading the previous request's KV.
+
 ## Build
 
 Clone **this** repository — upstream has no `--tp 2`, and neither do the other TP2 forks carry these
 KV tiers.
 
 ```bash
-git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
-cd ninfer-tp2-5060ti
+git clone https://github.com/BaiYouQing/ninfer-tp2-5060ti-windows.git
+cd ninfer-tp2-5060ti-windows
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -333,8 +380,9 @@ entirely inside the reasoning stream:
 - `--max-concurrency 1` is arithmetic on 16 GiB cards: the tier table below is what one slot costs,
   and `k16v8` at 253,952 leaves no room for a second.
 - MTP speculative decoding (`--spec mtp --draft-tokens 1..5`, optionally `--lm-head-draft`) works at
-  `--tp 2`, including compatible-prefix reuse. `--spec dflash` and `--vision` are rejected at
-  `--tp 2`.
+  `--tp 2`, including compatible-prefix reuse, and so does `--vision` (replicated-weights path, see
+  [Limitations](#limitations)). `--spec dflash` is rejected at `--tp 2`: the 35B-A3B backend has no
+  tensor-parallel path at all.
 - `--rope yarn`, the extended-position path this line inherits from upstream, is available but unused
   here: this fork's ceiling is 253,952 tokens, below the registered native 262,144, so no rope
   scaling is needed and none is measured.
@@ -388,8 +436,9 @@ carry `usage.cache_read_input_tokens` (with `cache_creation_input_tokens` report
 
 ### Limitations
 
-- **Vision is `--tp 1` only.** The Vision encoder runs on the primary device against replicated
-  weights and has no split path, so `--tp 2 --vision` is rejected at startup.
+- **Vision at `--tp 2` runs against replicated weights.** The Vision tower is materialized per
+  card and encoded on the primary card, with zero vision tensors crossing cards — the sharding map
+  only covers the text path.
 - **DFlash is rejected at `--tp 2`.** It remains a 35B-A3B text-only backend, and that target has no
   tensor-parallel path at all.
 - **Peer access depends on the board.** Upstream measured `cudaDeviceCanAccessPeer` as 0 between two

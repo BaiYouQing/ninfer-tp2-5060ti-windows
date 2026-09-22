@@ -131,8 +131,8 @@ identity —— Qwen3.6-27B 两个档、Qwen3.8-27B 的 `groupwise-int`、Qwen3.
 克隆**本仓**（不是上游，也不是本仓所继承的 TP2 fork）：
 
 ```bash
-git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
-cd ninfer-tp2-5060ti
+git clone https://github.com/BaiYouQing/ninfer-tp2-5060ti-windows.git
+cd ninfer-tp2-5060ti-windows
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -200,14 +200,16 @@ usage 计量），以及由 prompt 渲染的函数工具；`/health` 报告引�
 - `--tp 2` 必须显式给 `--devices A,B`，两块卡要同 compute capability；`--tp 1` 仍是默认；
 - `--kv-capacity` 必须 ≥ `--max-context`；要把某档顶到它的上限就得用**显式**容量（`auto` 会多留 512 MiB）；
 - 16 GiB 卡上 `--max-concurrency 1` 是算术：下一节的档位表就是单槽的成本，`k16v8` 在 253,952 上放不下第二槽；
-- `--spec dflash` 与 `--vision` 在 `--tp 2` 下启动即拒；MTP（`--spec mtp --draft-tokens 1..5`，可加
-  `--lm-head-draft`）在 `--tp 2` 下工作，**包括前缀复用**；
+- `--spec dflash` 在 `--tp 2` 下启动即拒（35B-A3B 后端没有张量并行路径）；MTP（`--spec mtp
+  --draft-tokens 1..5`，可加 `--lm-head-draft`）在 `--tp 2` 下工作，**包括前缀复用**；`--vision`
+  在 `--tp 2` 下可用（复制权重路径，见「已知限制」）；
 - `--rope yarn`（本线从上游继承的扩展位置路径）存在但本 fork 未使用：上限 253,952 低于原生 262,144，
   不需要位置缩放，也没有测过。
 
 **已知限制**（与 TP2 和本定版相关）：
 
-- 视觉只在 `--tp 1` 下可用（编码器没有分片路径，`--tp 2 --vision` 启动即拒）；
+- `--tp 2` 下的视觉走**复制权重**路径：视觉塔在每卡各物化一份、在主卡上编码，视觉张量不跨卡 ——
+  分片映射只覆盖文本路径；
 - **P2P 取决于板子**：上游在两块 5090 上测得 `cudaDeviceCanAccessPeer` 为 0、集合通信遂走 PCIe 主机中转；
   本 fork 实测的两块 5060 Ti 上该值是**双向 1**。无论哪种，一个 decode token 是 128 次 reduce 加一次 logit
   all-gather，CUDA Graph 下整套集合通信相对每轮约 28 ms 的权重读取很小；
@@ -273,7 +275,8 @@ GPQA-Diamond、ERQA、RealWorldQA，EvalScope 1.9.0、单样本）。注意那�
 
 ## 构建要求
 
-- 64 位 Linux；
+- 64 位 Linux，或 Windows 11（Windows 移植版用 `build.bat --arch 120a` 在 MSVC 下构建，FFmpeg/curl
+  运行库依赖放在 `.local/deps/` 下）；
 - **两块** NVIDIA GeForce RTX 5060 Ti（每块 16 GiB）—— 本 fork 就在这个平台上构建与实测；引擎本身可以在
   任意 `sm_120a` 设备上跑，一块或两块都行；
 - NVIDIA 驱动支持 CUDA 13.1，且 CUDA Toolkit 为 13.1 或更新；
@@ -287,8 +290,8 @@ GPQA-Diamond、ERQA、RealWorldQA，EvalScope 1.9.0、单样本）。注意那�
 构建只接受 `120a` 这一种 CUDA 架构，没有 install target，也不发布二进制包 —— NInfer 就在源码构建树里跑。
 
 ```bash
-git clone https://github.com/lynx-gt/ninfer-tp2-5060ti.git
-cd ninfer-tp2-5060ti
+git clone https://github.com/BaiYouQing/ninfer-tp2-5060ti-windows.git
+cd ninfer-tp2-5060ti-windows
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -302,6 +305,47 @@ build/apps/ninfer-serve
 ```
 
 测试、benchmark 与维护工具不在默认构建里。
+
+## 能跑哪些卡、各优化绑定什么条件
+
+一页看懂边界。
+
+**显卡兼容性。** 本树只为一种 CUDA 架构 `120a`（消费级 Blackwell）编译：CMake 在配置阶段拒掉其它
+任何架构列表，原因是结构性的 —— NVFP4 内核发射的是块缩放 FP4 矩阵乘指令（`mma.sync ...
+kind::mxf4nvf4`，见 [src/ops/common/mma.cuh](src/ops/common/mma.cuh)），只有 Blackwell 张量核
+实现了它。
+
+| 卡 | 架构 | 本树 |
+|---|---|---|
+| RTX 5090 / 5080 / 5070 Ti / 5070 / 5060 Ti / 5060 / 5050 | `sm_120a` | ✅ 构建并实测（2× RTX 5060 Ti） |
+| RTX 4090 / 4080 / 4070（Ada） | `sm_89` | ❌ 无块缩放 FP4 `mma`，NVFP4 内核汇编不过 |
+| RTX 3090 / 3080（Ampere） | `sm_86` | ❌ 同上，且连 FP8 都没有 |
+
+40/30 系显卡用官方的 `ninfer-xx90-win` 发布线：它的二进制把 `86`/`89`/`120a` 三套内核装进一个
+文件（约 680 MB，约 4.8 倍于本树只编 120a 的产物）；本树只带 `120a` 一套。
+
+单卡 vs 双卡：没有任何一份注册的 27B 产物装得进单张 16 GiB 卡（连 W4A4 档的 16.35 GiB 权重都
+不行，还没算 runtime 和 KV），所以 16 GiB 卡必须 `--tp 2` 上双卡；单张 32 GiB 的 RTX 5090 装得下
+官方 20.02 GiB 产物（`--tp 1` 后仍有余量给 KV），`--tp 2` 此时只是可选。
+
+**各优化绑定什么条件。** 按卡分的差异来自 ISA、卡间链路、显存容量，而不是驱动级调优：
+
+| 优化 | 绑定条件 | 2× RTX 5060 Ti 实测 |
+|---|---|---|
+| TP2 双卡分片 | 27B W4A4 = 16.35 GiB 权重 > 单卡 16 GiB ⇒ 双 16 GiB 是最小拓扑 | 每卡常驻减半 |
+| **PeerMailbox** pinned 主机传输（默认开；`NINFER_TP2_MAILBOX=0` 回退 staged 拷贝） | GeForce 卡无 P2P（`cudaDeviceCanAccessPeer = 0`；4090/5090/5060 Ti 都没有 NVLink）⇒ 跨卡集合通信走 PCIe 主机中转；mailbox 用 pinned 主机槽替掉逐拷贝的 event 编排，只在 CUDA Graph 捕获内启用 | 解码 1.53–1.60×，输出逐位相同 |
+| `int8` KV 档 | KV 常驻：2 B/元素 vs `k16v8` 的 3 B/元素 —— prefill 主要是写 KV | 80k 填充 +55–58%；253952 下多约 0.9 GiB 余量 |
+| MTP 投机解码 | checkpoint 必须带 MTP 头（`qwen3.8-27b` 自带 MTP3/MTP4）；`--tp 2` 下可用 | ~1.8×（开/关 MTP 对照，draft-tokens 3） |
+| **`--tp 2` 下的视觉** | 视觉塔（BF16）是 `Replicated`：每卡各物化一份、在主卡上编码；视觉张量不跨卡 | `--tp 2` 可收图 |
+
+驱动/OS 层只划门槛、不提供速度：`sm_120` 要 CUDA 13.x（本机实测 13.3）；Windows 上 WDDM 给
+单进程的显存预算决定进程最多能映射多少显存。
+
+**本仓库在上游之上加了什么。** 本树 = 上游
+[lynx-gt/ninfer-tp2-5060ti](https://github.com/lynx-gt/ninfer-tp2-5060ti) 线 + 四样东西：
+**Windows（MSVC）移植**（`build.bat --arch 120a`，SASS-only `120a-real`）、**`--tp 2` 下的视觉**
+（上游线启动即拒）、**pinned 主机 peer mailbox** 传输、**TP2 多模态修复**（同一引擎里后面的
+多模态请求不再读到上一请求的 KV）。
 
 ## 与上游的关系
 
