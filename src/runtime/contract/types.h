@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 
 namespace ninfer::runtime {
 
@@ -111,6 +112,19 @@ struct KvCapacityResolution {
     std::size_t available_after_startup_bytes        = 0;
     std::size_t automatic_headroom_bytes             = 0;
     std::size_t planned_slack_bytes                  = 0;
+};
+
+// A request plan is computed against the lane state it was shown and re-validated when the lane
+// is actually started. That state can move in between -- a retained prefix is evicted, an
+// auxiliary checkpoint is re-created by another request on the same lane -- so a plan that was
+// valid when it was computed can be stale by the time it is consumed. Every check that raises
+// this type runs in the plan's prologue, before anything device-side is touched, so the blast
+// radius is exactly one request: the caller may fail that request and keep serving. Naming it
+// separately is what stops `admit_planned_request` from routing it into the worker loop's
+// catch-all, which takes the whole executor down and forces a cold restart for every later caller.
+class PlanValidationError : public std::logic_error {
+public:
+    using std::logic_error::logic_error;
 };
 
 } // namespace ninfer::runtime

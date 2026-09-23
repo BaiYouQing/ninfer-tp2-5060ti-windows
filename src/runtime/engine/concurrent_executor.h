@@ -907,6 +907,23 @@ private:
             const bool cancel_at_boundary = request->cancelled.load(std::memory_order_acquire);
             resolve_prefill_step(request, first, cancel_at_boundary);
             publish_runtime_stats();
+        } catch (const PlanValidationError& stale) {
+            // The plan was re-validated when the lane started and the lane state had moved under
+            // it. Every check that raises this runs before the lane is touched, so nothing
+            // device-side happened: failing this one request is the entire blast radius. Routed
+            // to the worker loop's catch-all it would take the Engine down instead, and every
+            // later caller would pay a cold restart.
+            (void)stale;
+            if (prefill_lane_ && *prefill_lane_ == lane) {
+                instance_.request_memory.deactivate();
+                prefill_lane_.reset();
+            }
+            slots_[lane].reset();
+            invalidate_lane_plans(lane);
+            clear_protection_if_head(request);
+            complete_error(request, std::current_exception());
+            publish_runtime_stats();
+            return AdmissionProgress::ControlProgress;
         } catch (...) {
             const std::exception_ptr error = std::current_exception();
             if (target_started) { instance_.program->abort_lane(lane); }

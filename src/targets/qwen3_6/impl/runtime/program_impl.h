@@ -625,13 +625,13 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
         (!sequence.retained ||
          !qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
                                           request_plan.reuse_base))) {
-        throw std::logic_error("planned resident prefix is no longer reusable");
+        throw ninfer::runtime::PlanValidationError("planned resident prefix is no longer reusable");
     }
     if (is_rewrite_checkpoint_restore(request_plan.reuse) &&
         (!sequence.rewrite_checkpoint.valid ||
          sequence.rewrite_checkpoint.frontier != request_plan.reuse_base ||
          request_plan.reuse != restore_path(sequence.rewrite_checkpoint.kind))) {
-        throw std::logic_error("planned rewrite checkpoint is unavailable");
+        throw ninfer::runtime::PlanValidationError("planned rewrite checkpoint is unavailable");
     }
     if (request_plan.rewrite_checkpoint_action == RewriteCheckpointAction::KeepExisting &&
         (!prompt.identity.rewrite_checkpoint || !sequence.rewrite_checkpoint.valid ||
@@ -640,7 +640,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
          request_plan.reuse == ReusePath::FullReset ||
          !qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
                                           sequence.rewrite_checkpoint.frontier))) {
-        throw std::logic_error("planned rewrite checkpoint retention is unavailable");
+        throw ninfer::runtime::PlanValidationError("planned rewrite checkpoint retention is unavailable");
     }
     if (request_plan.rewrite_checkpoint_action == RewriteCheckpointAction::ReclassifyExisting &&
         (!prompt.identity.rewrite_checkpoint || !sequence.rewrite_checkpoint.valid ||
@@ -649,7 +649,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
          request_plan.reuse == ReusePath::FullReset ||
          !qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
                                           sequence.rewrite_checkpoint.frontier))) {
-        throw std::logic_error("planned rewrite checkpoint reclassification is unavailable");
+        throw ninfer::runtime::PlanValidationError("planned rewrite checkpoint reclassification is unavailable");
     }
     if (request_plan.rewrite_checkpoint_action == RewriteCheckpointAction::CaptureNew &&
         (!request_plan.rewrite_checkpoint_capture || !prompt.identity.rewrite_checkpoint ||
@@ -659,16 +659,16 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
              prompt.identity.rewrite_checkpoint->frontier ||
          request_plan.rewrite_checkpoint_capture->frontier <= request_plan.reuse_base ||
          request_plan.rewrite_checkpoint_capture->frontier > prompt_tokens)) {
-        throw std::logic_error("planned rewrite checkpoint capture is invalid");
+        throw ninfer::runtime::PlanValidationError("planned rewrite checkpoint capture is invalid");
     }
     if (request_plan.rewrite_checkpoint_action == RewriteCheckpointAction::Drop &&
         prompt.identity.rewrite_checkpoint) {
-        throw std::logic_error("planned rewrite checkpoint drop does not describe the prompt");
+        throw ninfer::runtime::PlanValidationError("planned rewrite checkpoint drop does not describe the prompt");
     }
     if (request_plan.rewrite_checkpoint_action == RewriteCheckpointAction::DeferCapture &&
         (!prompt.identity.rewrite_checkpoint || request_plan.reuse == ReusePath::FullReset ||
          prompt.identity.rewrite_checkpoint->frontier > request_plan.reuse_base)) {
-        throw std::logic_error("planned rewrite checkpoint deferral is invalid");
+        throw ninfer::runtime::PlanValidationError("planned rewrite checkpoint deferral is invalid");
     }
 
     const auto started       = Clock::now();

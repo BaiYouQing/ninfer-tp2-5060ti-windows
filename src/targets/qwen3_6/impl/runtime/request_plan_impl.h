@@ -262,28 +262,6 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
         plan->reuse_base = 0;
     }
 
-    const std::optional<RewriteCheckpointSpec>& desired = base.rewrite_checkpoint;
-    const bool existing_checkpoint_matches =
-        desired && plan->reuse != ReusePath::FullReset && sequence.rewrite_checkpoint.valid &&
-        sequence.rewrite_checkpoint.frontier == desired->frontier &&
-        qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
-                                        desired->frontier);
-    if (!desired) {
-        plan->rewrite_checkpoint_action = RewriteCheckpointAction::Drop;
-    } else if (existing_checkpoint_matches) {
-        plan->rewrite_checkpoint_action = sequence.rewrite_checkpoint.kind == desired->kind
-                                              ? RewriteCheckpointAction::KeepExisting
-                                              : RewriteCheckpointAction::ReclassifyExisting;
-    } else if (desired->frontier > plan->reuse_base) {
-        plan->rewrite_checkpoint_action  = RewriteCheckpointAction::CaptureNew;
-        plan->rewrite_checkpoint_capture = desired;
-    } else {
-        // The selected continuation state is already past the desired boundary. It remains a
-        // valid hit; do not replay an otherwise reusable prefix merely to materialize an older
-        // auxiliary snapshot. A later request can still use the checkpoint currently retained.
-        plan->rewrite_checkpoint_action = RewriteCheckpointAction::DeferCapture;
-    }
-
     // A resumed prefill has to reproduce the chunk decomposition a full prefill would use, or the
     // two paths land on different floating-point accumulations -- and greedy decoding turns a last
     // bit into different text. The boundary that matters is the prefill chunk grid: a full prefill
@@ -314,15 +292,34 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
             plan->reuse_base = aligned;
         }
     }
-    // The checkpoint decisions above may have selected an action that requires a live reuse, while
-    // the alignment just downgraded the plan to a full reset. Keep the two consistent: a dropped
-    // reuse cannot retain or reclassify a checkpoint. (Ignoring this is what made a repeated prompt
-    // throw from plan validation -- and an exception at that point takes the whole executor down.)
-    if (plan->reuse == ReusePath::FullReset) {
-        if (plan->rewrite_checkpoint_action == RewriteCheckpointAction::KeepExisting ||
-            plan->rewrite_checkpoint_action == RewriteCheckpointAction::ReclassifyExisting) {
-            plan->rewrite_checkpoint_action = RewriteCheckpointAction::Drop;
-        }
+    // The checkpoint action is decided last, against the *final* reuse path. Everything above can
+    // invalidate a reuse that was live when the action would traditionally have been chosen: the
+    // speculative downgrade and the chunk-grid retreat both turn a reusable plan into a full reset.
+    // Deciding here keeps the action consistent with the execution-time validation by construction
+    // -- a full reset whose prompt carries a checkpoint captures a new one at its frontier (never
+    // `Drop`, which the prompt's own checkpoint would contradict), and a full reset without one
+    // drops it. Choosing it earlier is what let a repeated prompt throw out of plan validation,
+    // and an exception there takes the whole executor down with it.
+    const std::optional<RewriteCheckpointSpec>& desired = base.rewrite_checkpoint;
+    const bool existing_checkpoint_matches =
+        desired && plan->reuse != ReusePath::FullReset && sequence.rewrite_checkpoint.valid &&
+        sequence.rewrite_checkpoint.frontier == desired->frontier &&
+        qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
+                                        desired->frontier);
+    if (!desired) {
+        plan->rewrite_checkpoint_action = RewriteCheckpointAction::Drop;
+    } else if (existing_checkpoint_matches) {
+        plan->rewrite_checkpoint_action = sequence.rewrite_checkpoint.kind == desired->kind
+                                              ? RewriteCheckpointAction::KeepExisting
+                                              : RewriteCheckpointAction::ReclassifyExisting;
+    } else if (desired->frontier > plan->reuse_base) {
+        plan->rewrite_checkpoint_action  = RewriteCheckpointAction::CaptureNew;
+        plan->rewrite_checkpoint_capture = desired;
+    } else {
+        // The selected continuation state is already past the desired boundary. It remains a
+        // valid hit; do not replay an otherwise reusable prefix merely to materialize an older
+        // auxiliary snapshot. A later request can still use the checkpoint currently retained.
+        plan->rewrite_checkpoint_action = RewriteCheckpointAction::DeferCapture;
     }
 
     plan->summary.reusable_prompt_tokens = plan->reuse_base;
